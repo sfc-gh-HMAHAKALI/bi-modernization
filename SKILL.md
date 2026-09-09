@@ -106,6 +106,48 @@ Chart type coverage: X% explicit (from source files), Y% inferred via heuristics
 
 ---
 
+## Step 3b: Extract Visual Metadata
+
+Extract color schemes, layout coordinates, column aliases, number formats, parameters,
+and filter configurations from the original source file. This produces a `visuals.json`
+sidecar that generators use for pixel-accurate reproduction.
+
+```bash
+cd "$BIM_DIR"
+python3 -m modules.cli extract-visuals "<original_source_file>" \
+  -o /tmp/bim_visuals.json
+```
+
+Review the output summary:
+```
+Visual metadata extracted: /tmp/bim_visuals.json
+  Color mappings:    N value→color pairs (e.g., RRC: L=#59a14f, M=#4e79a7)
+  Column aliases:    N (e.g., Calculation_123 → "Recommended CL")
+  Dashboard layouts: N (zone coordinates per dashboard)
+  Worksheet filters: N filter configurations
+  Parameters:        N (with allowed values and aliases)
+```
+
+**Present the color mappings to the user** for confirmation — these drive the entire visual
+styling of the generated app:
+
+```
+Extracted color scheme from source file:
+  Field: RRC
+    L → #59a14f (green)
+    M → #4e79a7 (blue)
+    H → #f28e2b (orange)
+    C → #e15759 (red)
+  Background: #f5f5f5
+  Accent: #0077c0
+
+Does this match the original dashboard? Any corrections?
+```
+
+Pass `--visuals /tmp/bim_visuals.json` to all subsequent generate commands.
+
+---
+
 ## Step 4: Preview What Was Found
 
 Run the agent assessment to generate the domain structure:
@@ -230,6 +272,7 @@ cd "$BIM_DIR"
 python3 -m modules.cli generate-streamlit /tmp/bim_enriched.json \
   [--semantic-view DB.SCHEMA.SEMANTIC_VIEW] \
   [--embed-agent DB.SCHEMA.AGENT_NAME] \
+  [--visuals /tmp/bim_visuals.json] \
   -o /tmp/bim_streamlit/
 ```
 
@@ -337,6 +380,42 @@ skill(command="developing-with-streamlit-in-snowflake")
 
 Tell it: "I have a Streamlit app at /tmp/bim_streamlit/.
 Please help me deploy it to Snowflake. The entry point is app.py (or home.py if multi-file)."
+
+### Step 8d: Fidelity Report
+
+**ALWAYS present a fidelity report before deployment.** This tells the user exactly
+what is faithful to the original and what is approximated.
+
+Read `/tmp/bim_visuals.json` and the generated app code, then present:
+
+```
+Visual Fidelity Report
+══════════════════════
+
+✅ Extracted from source (pixel-accurate):
+   - Color scheme: [list each field→color mapping with hex codes]
+   - Background color: #f5f5f5
+   - Parameters: [list each with values]
+   - Column aliases: [count] resolved (list top 5)
+   - Number formats: [list if any]
+   - Dashboard layout proportions: [zone height ratios]
+   - Filter configurations: [count] per worksheet
+
+⚠️ Approximated (close but not exact):
+   - Chart type: [note if inferred via heuristic vs. explicit mark]
+   - Font family: [note if not specified in source]
+   - Header bar styling (Snowflake brand gradient — not in original)
+   - Column ordering (may differ from original worksheet row/col encoding)
+
+❌ Cannot reproduce in Streamlit:
+   - Tableau storyboard tab animation
+   - Tooltip rich formatting on hover
+   - Action filter cross-highlighting between worksheets
+   - Tableau Server/Cloud auth integration
+   - Dynamic LOD expressions (if any were flagged as manual)
+```
+
+Ask the user: "Does this look acceptable? Any colors or layouts to adjust before deployment?"
 
 ---
 

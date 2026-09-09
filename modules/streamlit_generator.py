@@ -358,10 +358,12 @@ def _generate_dashboard_page(
     semantic_view: str | None,
     embed_agent: str | None,
     ds_table_map: dict[str, str] | None = None,
+    visuals: dict | None = None,
 ) -> str:
     """Generate the full Python source for one dashboard page."""
     name = dashboard.get("name", "Dashboard")
     slug = _slugify(name)
+    vis = visuals or {}
     # Normalize: sheets may be plain strings (zone names with no field metadata)
     # or full dicts produced by extract_dashboard_field_usage.  Always work with dicts.
     sheets = [
@@ -399,6 +401,28 @@ def _generate_dashboard_page(
         '    initial_sidebar_state="expanded",',
         ')',
         '',
+    ]
+
+    # ── Inject extracted visual metadata as constants ───────────────────
+    color_maps = vis.get("color_mappings", {})
+    col_aliases = vis.get("column_aliases", {})
+    bg_color = vis.get("global_styles", {}).get("background_color", "")
+    params = vis.get("parameters", [])
+
+    if color_maps:
+        lines.append(f'# Color mappings extracted from source BI file')
+        lines.append(f'_COLOR_MAPS = {json.dumps(color_maps)}')
+        lines.append('')
+    if col_aliases:
+        lines.append(f'# Column display name aliases extracted from source BI file')
+        lines.append(f'_COL_ALIASES = {json.dumps(col_aliases)}')
+        lines.append('')
+    if bg_color:
+        lines.append(f'# Background color from source')
+        lines.append(f'st.markdown(\'<style>.stApp {{background-color: {bg_color};}}</style>\', unsafe_allow_html=True)')
+        lines.append('')
+
+    lines += [
         '# ── Header ───────────────────────────────────────────────────────────────',
         '_hdr_col1, _hdr_col2 = st.columns([5, 1])',
         'with _hdr_col1:',
@@ -410,6 +434,17 @@ def _generate_dashboard_page(
         'with st.sidebar:',
         '    st.header("Filters")',
     ]
+
+    # Generate parameter-based filters from visuals.json
+    if params:
+        for param in params:
+            pname = param.get("name", "")
+            vals = param.get("values", [])
+            default = param.get("default", "")
+            aliases_map = param.get("aliases", {})
+            if vals:
+                display_vals = [v.get("alias", v.get("value", "")) for v in vals]
+                lines.append(f'    _{_slugify(pname)} = st.selectbox("{pname}", {json.dumps(display_vals)})')
 
     lines.append(_filter_code(filter_widgets))
 
@@ -515,6 +550,7 @@ def generate(
     semantic_view: str | None = None,
     embed_agent: str | None = None,
     dashboards_filter: list[str] | None = None,
+    visuals_path: str | None = None,
 ) -> dict[str, Any]:
     """
     Main entry point called by cli.py.
@@ -523,6 +559,12 @@ def generate(
     """
     with open(inventory_path) as fh:
         inventory = json.load(fh)
+
+    # Load visual metadata if provided
+    visuals: dict = {}
+    if visuals_path:
+        with open(visuals_path) as fh:
+            visuals = json.load(fh)
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -554,7 +596,7 @@ def generate(
         fpath = out / fname
         code = _generate_dashboard_page(
             dash, inventory, primary_table, semantic_view, embed_agent,
-            ds_table_map=ds_table_map,
+            ds_table_map=ds_table_map, visuals=visuals,
         )
         fpath.write_text(code, encoding="utf-8")
         generated.append({
@@ -583,4 +625,5 @@ def generate(
         "dashboard_count": len(dashboards),
         "embed_agent": embed_agent,
         "semantic_view": semantic_view,
+        "visuals_loaded": bool(visuals),
     }

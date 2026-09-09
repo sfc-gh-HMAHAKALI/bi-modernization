@@ -110,6 +110,7 @@ def cmd_generate_streamlit(args: argparse.Namespace) -> None:
             semantic_view=args.semantic_view,
             embed_agent=args.embed_agent,
             dashboards_filter=dashboards_filter,
+            visuals_path=getattr(args, 'visuals', None),
         )
         result["elapsed_seconds"] = round(time.perf_counter() - t0, 2)
 
@@ -359,6 +360,44 @@ def cmd_preview(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Command: extract-visuals
+# ---------------------------------------------------------------------------
+
+def cmd_extract_visuals(args: argparse.Namespace) -> None:
+    t0 = time.perf_counter()
+    from .visual_extractor import extract
+
+    output = args.output or args.input.rsplit(".", 1)[0] + "_visuals.json"
+
+    try:
+        result = extract(
+            source_path=args.input,
+            output_path=output,
+        )
+        result["elapsed_seconds"] = round(time.perf_counter() - t0, 2)
+
+        # Summary to stderr
+        color_count = sum(len(v) for v in result.get("color_mappings", {}).values())
+        alias_count = len(result.get("column_aliases", {}))
+        layout_count = len(result.get("dashboard_layouts", {}))
+        filter_count = sum(len(v) for v in result.get("worksheet_filters", {}).values())
+        param_count = len(result.get("parameters", []))
+        print(
+            f"\nVisual metadata extracted: {output}\n"
+            f"  Color mappings:    {color_count} value→color pairs\n"
+            f"  Column aliases:    {alias_count}\n"
+            f"  Dashboard layouts: {layout_count}\n"
+            f"  Worksheet filters: {filter_count}\n"
+            f"  Parameters:        {param_count}\n",
+            file=sys.stderr,
+        )
+        _emit(result)
+    except Exception as exc:
+        logger.exception("extract-visuals failed")
+        _emit({"status": "error", "command": "extract-visuals", "error": str(exc)})
+
+
+# ---------------------------------------------------------------------------
 # Command: restore-react (undo mock injection after preview)
 # ---------------------------------------------------------------------------
 
@@ -399,6 +438,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_sl.add_argument("-o", "--output",   help="Output directory (default: ~/Downloads/bim_streamlit_<ts>).")
     p_sl.add_argument("--semantic-view",  help="Snowflake Semantic View FQN for query generation.")
     p_sl.add_argument("--embed-agent",    help="Cortex Agent FQN to embed as a chat panel in the app.")
+    p_sl.add_argument("--visuals",        help="Path to visuals.json from extract-visuals (colors, layout, formats).")
     p_sl.add_argument("--dashboards",     help="Comma-separated list of dashboard names to include (default: all).")
 
     # ── generate-react ─────────────────────────────────────────────────────
@@ -441,6 +481,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_pv.add_argument("--generate-only", action="store_true",
                       help="Inject synthetic data but do not launch the server.")
 
+    # ── extract-visuals ──────────────────────────────────────────────────────
+    p_ev = sub.add_parser("extract-visuals",
+                           help="Extract visual metadata (colors, layout, formats) from BI source files.")
+    p_ev.add_argument("input",         help="Path to BI source file (.twb, .twbx, .pbix, .pbit).")
+    p_ev.add_argument("-o", "--output", help="Output path for visuals.json (default: auto).")
+
     # ── restore-react ───────────────────────────────────────────────────────
     p_rr = sub.add_parser("restore-react",
                            help="Restore production snowflake.ts after a React preview.")
@@ -459,6 +505,7 @@ def main() -> None:
 
     dispatch = {
         "enrich-charts":      cmd_enrich_charts,
+        "extract-visuals":    cmd_extract_visuals,
         "generate-streamlit": cmd_generate_streamlit,
         "generate-react":     cmd_generate_react,
         "build-agent":        cmd_build_agent,
