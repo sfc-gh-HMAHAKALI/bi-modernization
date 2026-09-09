@@ -299,7 +299,12 @@ def _generate_dashboard_page(
     """Generate the full Python source for one dashboard page."""
     name = dashboard.get("name", "Dashboard")
     slug = _slugify(name)
-    sheets = dashboard.get("sheets", [])
+    # Normalize: sheets may be plain strings (zone names with no field metadata)
+    # or full dicts produced by extract_dashboard_field_usage.  Always work with dicts.
+    sheets = [
+        s if isinstance(s, dict) else {"name": s, "fields_by_datasource": {}}
+        for s in dashboard.get("sheets", [])
+    ]
 
     dims = inventory.get("dimensions", [])
     measures = inventory.get("measures", []) + inventory.get("metrics", []) + inventory.get("facts", [])

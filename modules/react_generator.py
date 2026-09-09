@@ -773,7 +773,12 @@ def _gen_dashboard_page_tsx(
 ) -> str:
     """Generate a Next.js page for one dashboard."""
     name = dashboard.get("name", "Dashboard")
-    sheets = dashboard.get("sheets", [])
+    # Normalize: sheets may be plain strings (zone names with no field metadata)
+    # or full dicts produced by extract_dashboard_field_usage.  Always work with dicts.
+    sheets = [
+        s if isinstance(s, dict) else {"name": s, "fields_by_datasource": {}}
+        for s in dashboard.get("sheets", [])
+    ]
 
     dims = inventory.get("dimensions", [])
     measures = (inventory.get("measures", []) +
