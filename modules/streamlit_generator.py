@@ -40,6 +40,28 @@ def _slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
+def _sanitize_sheet_name(raw_name: str) -> tuple[str, bool]:
+    """Return (clean_display_name, should_skip).
+    should_skip=True for image zones, text-only zones, etc."""
+    # Skip image file paths
+    if any(raw_name.lower().endswith(ext) for ext in ('.jpg', '.jpeg', '.png', '.gif', '.svg', '.bmp')):
+        return raw_name, True
+    # Skip blank / whitespace-only names
+    if not raw_name.strip():
+        return raw_name, True
+    # Bracket notation: [datasource].[qualifier:FIELD_NAME:type]
+    if raw_name.startswith('[') and '].' in raw_name:
+        after_dot = raw_name.split('].', 1)[-1]
+        match = re.search(r'\[(?:none:)?([^:\]]+)', after_dot)
+        if match:
+            return match.group(1).replace('_', ' ').title(), False
+    # Plain bracket-wrapped name
+    clean = re.sub(r'^\[|\]$', '', raw_name).strip()
+    if clean:
+        return clean, False
+    return raw_name, True
+
+
 def _field_list(fields_by_ds: dict) -> list[str]:
     """Flatten fields_by_datasource into a plain list of field name strings."""
     out: list[str] = []
@@ -49,6 +71,37 @@ def _field_list(fields_by_ds: dict) -> list[str]:
     return [f for f in out if f]
 
 
+def _build_ds_table_map(inventory: dict) -> dict[str, str]:
+    """Build a mapping of datasource name -> fully qualified table name."""
+    db = inventory.get("snowflake_target", {}).get("database", "DB")
+    sch = inventory.get("snowflake_target", {}).get("schema", "SCHEMA")
+    ds_map: dict[str, str] = {}
+    for t in inventory.get("tables", []):
+        ds_name = t.get("datasource", "")
+        tname = t.get("snowflake_name") or t.get("name", "TABLE")
+        fqn = f"{db}.{sch}.{tname}"
+        if ds_name and ds_name not in ds_map:
+            ds_map[ds_name] = fqn
+        # Also map by physical table name
+        pname = t.get("physical_table", "")
+        if pname and pname not in ds_map:
+            ds_map[pname] = fqn
+    return ds_map
+
+
+def _resolve_table_for_sheet(sheet: dict, ds_table_map: dict[str, str],
+                              fallback_table: str) -> str:
+    """Pick the best table for a sheet by matching its datasource keys."""
+    for ds_key in sheet.get("fields_by_datasource", {}).keys():
+        if ds_key in ds_table_map:
+            return ds_table_map[ds_key]
+        # Try substring match (datasource names can be verbose)
+        for map_key, fqn in ds_table_map.items():
+            if map_key in ds_key or ds_key in map_key:
+                return fqn
+    return fallback_table
+
+
 def _resolve_query_fields(sheet: dict, dims: list[dict], measures: list[dict],
                            table_name: str, chart_type: str) -> dict:
     """
@@ -56,12 +109,21 @@ def _resolve_query_fields(sheet: dict, dims: list[dict], measures: list[dict],
     Returns dict with: sql, x_col, y_col, color_col, measure_col, dim_col.
     """
     sheet_fields = _field_list(sheet.get("fields_by_datasource", {}))
+    # Strip bracket notation from field names for matching
+    clean_fields = set()
+    for f in sheet_fields:
+        clean = re.sub(r'^\[|\]$', '', f).upper()
+        # Also strip Calculation_ prefix for matching
+        if not clean.startswith('CALCULATION_'):
+            clean_fields.add(clean)
 
     # Find dims and measures that appear in this sheet
     sheet_dim_names = [d["name"] for d in dims
-                       if d.get("name") in sheet_fields][:3]
+                       if d.get("name", "").upper() in clean_fields
+                       or d.get("name", "") in sheet_fields][:3]
     sheet_measure_names = [m["name"] for m in measures
-                           if m.get("name") in sheet_fields][:2]
+                           if m.get("name", "").upper() in clean_fields
+                           or m.get("name", "") in sheet_fields][:2]
 
     # Fallback: if nothing matched, use first available dim/measure
     if not sheet_dim_names and dims:
@@ -295,6 +357,7 @@ def _generate_dashboard_page(
     table_name: str,
     semantic_view: str | None,
     embed_agent: str | None,
+    ds_table_map: dict[str, str] | None = None,
 ) -> str:
     """Generate the full Python source for one dashboard page."""
     name = dashboard.get("name", "Dashboard")
@@ -314,7 +377,8 @@ def _generate_dashboard_page(
     filter_widgets = infer_filter_widgets(raw_filters) if raw_filters else []
 
     # Use semantic view as query target when available
-    query_target = semantic_view or table_name or "TARGET_TABLE  -- TODO: replace with actual table"
+    fallback_target = semantic_view or table_name or "TARGET_TABLE  -- TODO: replace with actual table"
+    _ds_map = ds_table_map or {}
 
     lines: list[str] = [
         '"""',
@@ -360,8 +424,14 @@ def _generate_dashboard_page(
     open_cols = False
 
     for i, sheet in enumerate(sheets):
-        sname = sheet.get("name", f"Sheet {i+1}")
+        raw_sname = sheet.get("name", f"Sheet {i+1}")
+        sname, skip = _sanitize_sheet_name(raw_sname)
+        if skip:
+            continue
         chart_type = sheet.get("chart_type_plotly") or "bar"
+
+        # Resolve per-datasource table
+        query_target = _resolve_table_for_sheet(sheet, _ds_map, fallback_target)
 
         # Tables and metrics get full width
         full_width = chart_type in ("table", "metric", "metric_table", "filter",
@@ -407,30 +477,36 @@ def _generate_dashboard_page(
 
 
 def _generate_home(dashboard_names: list[str]) -> str:
-    """Generate the home.py multipage navigation entry point."""
-    imports = [
+    """Generate the home.py entry point using st.radio sidebar (Streamlit 1.24+ compat)."""
+    lines = [
         '"""',
-        'Streamlit multipage home — generated by bi-modernization skill.',
+        'Streamlit app home — generated by bi-modernization skill.',
+        'Uses st.radio sidebar navigation for broad Streamlit version compatibility.',
         '"""',
         'import streamlit as st',
+        'import importlib',
         '',
+        'st.set_page_config(page_title="Dashboard", layout="wide", page_icon="\U0001f4ca")',
+        '',
+        '# Sidebar navigation',
+        'with st.sidebar:',
+        '    page = st.radio("Navigate", [',
     ]
-
-    page_defs = []
     for name in dashboard_names:
-        slug = _slugify(name)
-        page_defs.append(
-            f'    st.Page("dashboard_{slug}.py", title="{name}", icon=":material/bar_chart:"),'
-        )
-
-    nav_block = [
-        '_pages = st.navigation([',
-        *page_defs,
-        '])',
-        '_pages.run()',
+        lines.append(f'        "{name}",')
+    lines += [
+        '    ], label_visibility="collapsed")',
         '',
+        '# Page routing',
     ]
-    return "\n".join(imports + nav_block)
+    for i, name in enumerate(dashboard_names):
+        slug = _slugify(name)
+        cond = 'if' if i == 0 else 'elif'
+        lines.append(f'{cond} page == "{name}":')
+        lines.append(f'    import dashboard_{slug}')
+        lines.append(f'    dashboard_{slug}.render()')
+    lines.append('')
+    return "\n".join(lines)
 
 
 def generate(
@@ -459,7 +535,8 @@ def generate(
         # Build minimal dashboard from worksheets
         dashboards = [{"name": "Dashboard", "sheets": inventory.get("worksheets", [])}]
 
-    # Resolve a primary table name for SQL generation
+    # Build per-datasource table map + primary fallback
+    ds_table_map = _build_ds_table_map(inventory)
     tables = inventory.get("tables", [])
     primary_table = ""
     if tables:
@@ -476,7 +553,8 @@ def generate(
         fname = f"dashboard_{slug}.py"
         fpath = out / fname
         code = _generate_dashboard_page(
-            dash, inventory, primary_table, semantic_view, embed_agent
+            dash, inventory, primary_table, semantic_view, embed_agent,
+            ds_table_map=ds_table_map,
         )
         fpath.write_text(code, encoding="utf-8")
         generated.append({

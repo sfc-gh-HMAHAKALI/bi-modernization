@@ -233,55 +233,110 @@ python3 -m modules.cli generate-streamlit /tmp/bim_enriched.json \
   -o /tmp/bim_streamlit/
 ```
 
-Show the user which pages were generated:
-```
-Generated Streamlit app: /tmp/bim_streamlit/
-  home.py              — navigation entry point
-  dashboard_revenue.py — Revenue Dashboard (3 charts: 2 bar, 1 line)
-  dashboard_pipeline.py — Pipeline Overview (4 charts: 2 bar, 1 line, 1 metric)
-  ...
-```
+### Step 8a: Quality Gate
 
-**ALWAYS offer a local preview before deployment** — this is the default behaviour.
-Ask the user:
+**CRITICAL — before showing the output to the user, validate it.**
 
-```
-ask_user_question: "Would you like to see a local preview of the Streamlit app
-  before deploying it to Snowflake? I'll launch it on http://localhost:8501 using
-  synthetic data — no Snowflake connection needed."
-type: options
-options:
-  - label: "Yes, show me a preview first" (recommended)
-  - label: "Skip preview and deploy directly"
-```
+Read each generated `.py` file and check for these degeneracies:
 
-If the user wants a preview:
+1. **Identical SQL queries** — read all the SQL strings (the text inside `_session.sql(""" ... """)` blocks). If >50% of sheets have the exact same SQL query, the field resolution failed.
+2. **Raw XML sheet names** — check if any `st.subheader()` or chart title contains bracket notation (`[...].[...]`), file paths (`.jpg`, `.png`), or Tableau-internal strings like `none:FIELD:nk`.
+3. **All bar charts** — if every single chart is `px.bar` and the enriched inventory shows all marks were "Automatic", the chart type detection failed. The workbook is likely tabular/crosstab.
+4. **No filters** — check if the sidebar section only contains `pass  # No filters detected`. Compare against `inventory["parameters"]` and worksheet-level filters.
+5. **Uses `st.navigation`** — this requires Streamlit >= 1.36. Many environments have older versions.
+6. **Placeholder table names** — SQL targeting `TARGET_DB.PUBLIC.EXTRACT` or `DB.SCHEMA.TABLE` means table resolution failed.
+
+**If ANY of these degeneracies are found, do NOT present the generated files to the user. Proceed to Step 8b instead.**
+
+If all checks pass, proceed to show the user the generated pages and offer a preview.
+
+### Step 8b: LLM-Driven App Generation (fallback)
+
+When the automated generator produces low-quality output, build the Streamlit app manually.
+This produces significantly better results for complex workbooks with custom SQL, crosstab
+layouts, calculated fields, or role-based views.
+
+**Step 8b.1: Deep analysis of the enriched inventory**
+
+Read `/tmp/bim_enriched.json` and extract:
+- Dashboard names and the worksheets they contain
+- For each worksheet: `fields_by_datasource` (which datasources it uses and which fields)
+- All dimensions, measures/facts, and their names/expressions
+- Parameters and their allowed values
+- The `source_type` (tableau, powerbi, etc.)
+
+**Step 8b.2: Deep analysis of the source BI file**
+
+If the original source file is available (TWB, PBIX, etc.), re-read it directly to extract
+what the parser missed:
+
+For **Tableau (.twb)**:
+- Parse `<worksheet>` elements: extract the `<mark class="...">` for each (Bar, Line, Text, Automatic)
+- Parse `<column>` elements within each datasource: extract `caption`, `datatype`, `role`, and `<calculation formula="...">` for calculated fields
+- Parse `<relation>` elements: extract the actual custom SQL queries
+- Parse `<dashboard>` zones: match zone worksheet references to worksheet names
+- Parse `<filter>` elements: extract which fields are used as filters and their allowed values
+- Identify the dashboard layout pattern (storyboard? standard? tabbed?)
+
+For **Power BI (.pbix / .pbit)**:
+- Parse report page visuals for chart types and field bindings
+- Extract DAX measures and their expressions
+
+**Step 8b.3: Build the Streamlit app**
+
+Generate a **single-file `app.py`** (more robust than multi-file for compatibility):
+
+1. **Data layer**: If the user's Snowflake account has the source tables, generate `session.sql()` queries based on the actual custom SQL from the source file. If not (demo mode), generate a `@st.cache_data` function with synthetic data that matches the schema — realistic column names, data types, value distributions, and calculated fields.
+
+2. **Navigation**: Use `st.radio()` in the sidebar (works on Streamlit 1.24+). Do NOT use `st.navigation()` or `st.Page()`.
+
+3. **Layout**: Match the original dashboard structure:
+   - If the source is a **storyboard** (Tableau) → sidebar radio navigation between story points
+   - If it has **role-based views** (same layout filtered differently) → single page template function called per role with different filter values
+   - If it has **distinct dashboards** → separate page functions
+
+4. **Tables**: For crosstab/text mark worksheets, render using **HTML tables via `st.markdown(unsafe_allow_html=True)`** with:
+   - Sticky dark-colored header row
+   - Right-aligned currency columns with `$X,XXX` formatting
+   - Alternating row colors
+   - Compact 5-6px padding (Tableau-dense)
+   - Cell-level color badges for categorical fields (e.g., risk categories)
+   - Color-tinted row backgrounds keyed to a category column
+
+5. **Charts**: For chart worksheets, use `plotly.express` with the Snowflake color palette.
+
+6. **KPIs**: Use styled HTML `<div>` cards, not plain `st.metric()`.
+
+7. **Filters**: Extract parameters and filter fields from the inventory. Render as `st.multiselect`, `st.radio`, or `st.selectbox` in the sidebar.
+
+8. **CSS**: Inject a `<style>` block via `st.markdown()` with:
+   - Corporate header bar (gradient blue: `#11567F` → `#29B5E8`)
+   - Dense table styling (`.dtable` class)
+   - Badge/pill components for categorical values
+   - Scrollable table containers with max-height
+
+**Step 8b.4: Preview**
+
+Save the app to `/tmp/bim_streamlit/app.py` and launch a local preview:
+
 ```bash
-cd "$BIM_DIR"
-python3 -m modules.cli preview /tmp/bim_enriched.json \
-  --app-dir /tmp/bim_streamlit/ \
-  --type streamlit \
-  --rows 30
+cd /tmp/bim_streamlit && streamlit run app.py --server.port 8501 --server.headless true
 ```
 
-This will:
-1. Generate `preview_dashboard_*.py` files with a synthetic data mock session
-2. Launch `streamlit run preview_home.py` on http://localhost:8501
-3. Display charts using plausible synthetic values for every field type
+Open the browser and take a screenshot to verify. If issues are found, fix them before
+presenting to the user.
 
-Tell the user: "Your preview is running at http://localhost:8501. Review the
-dashboard layout and chart types. Press Ctrl+C in the terminal to stop the
-preview, then let me know if you want any changes before deploying."
+**ALWAYS offer a local preview before deployment.**
 
-Wait for the user to confirm the preview looks acceptable before continuing.
+### Step 8c: Deploy (after preview is approved)
 
 Then invoke the Streamlit skill for deployment:
 ```python
 skill(command="developing-with-streamlit-in-snowflake")
 ```
 
-Tell it: "I have a multi-page Streamlit app generated at /tmp/bim_streamlit/. 
-Please help me deploy it to Snowflake. The entry point is home.py."
+Tell it: "I have a Streamlit app at /tmp/bim_streamlit/.
+Please help me deploy it to Snowflake. The entry point is app.py (or home.py if multi-file)."
 
 ---
 

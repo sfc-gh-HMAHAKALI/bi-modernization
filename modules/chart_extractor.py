@@ -164,8 +164,10 @@ def _enrich_tableau(inventory: dict, source_files: list[str]) -> tuple[dict, dic
             # "Automatic" or unknown — fall back to heuristics
             all_fields = []
             for fields in ws.get("fields_by_datasource", {}).values():
-                all_fields.extend(fields if isinstance(fields[0], dict) else
-                                   [{"name": f, "role": "dimension"} for f in fields])
+                if fields and isinstance(fields[0], dict):
+                    all_fields.extend(fields)
+                elif fields:
+                    all_fields.extend({"name": f, "role": "dimension"} for f in fields)
             plotly_type = infer_chart_type(all_fields)
             echarts_type = plotly_type  # heuristics return Plotly keys, same string is fine
             heuristic += 1
@@ -176,14 +178,50 @@ def _enrich_tableau(inventory: dict, source_files: list[str]) -> tuple[dict, dic
         ws["chart_type_plotly"] = plotly_type
         ws["chart_type_echarts"] = echarts_type
 
-    # Also propagate into dashboard sheet references
+    # Post-pass: if EVERY worksheet was "Automatic" and heuristics assigned "bar"
+    # to most of them, this is likely a tabular/crosstab workbook. Override to "table".
+    if total > 0 and heuristic == total:
+        bar_count = sum(1 for ws in inventory.get("worksheets", [])
+                        if ws.get("chart_type_plotly") == "bar")
+        if bar_count > total * 0.5:
+            for ws in inventory.get("worksheets", []):
+                if ws.get("chart_type_plotly") == "bar":
+                    ws["chart_type_plotly"] = "table"
+                    ws["chart_type_echarts"] = "table"
+
+    # Also propagate into dashboard sheet references.
+    # Dashboard sheets may be zone references (bracket notation) rather than
+    # worksheet names.  Try to match them back to actual worksheets.
     ws_lookup = {ws.get("name"): ws for ws in inventory.get("worksheets", [])}
     for dash in inventory.get("dashboards", []):
+        resolved_sheets = []
         for sheet in dash.get("sheets", []):
-            src = ws_lookup.get(sheet.get("name"))
+            sname = sheet.get("name") if isinstance(sheet, dict) else sheet
+            src = ws_lookup.get(sname)
+
+            # If direct match failed, try matching zone references to worksheets
+            if src is None and sname:
+                # Zone format: [datasource].[qualifier:field:type] — try to find
+                # a worksheet whose fields_by_datasource keys overlap
+                for ws_name, ws in ws_lookup.items():
+                    if ws_name in sname or sname in ws_name:
+                        src = ws
+                        break
+
             if src:
-                sheet["chart_type_plotly"] = src.get("chart_type_plotly")
-                sheet["chart_type_echarts"] = src.get("chart_type_echarts")
+                if isinstance(sheet, dict):
+                    sheet["chart_type_plotly"] = src.get("chart_type_plotly")
+                    sheet["chart_type_echarts"] = src.get("chart_type_echarts")
+                    # Also copy fields_by_datasource if the zone had none
+                    if not sheet.get("fields_by_datasource"):
+                        sheet["fields_by_datasource"] = src.get("fields_by_datasource", {})
+                resolved_sheets.append(sheet)
+            else:
+                # Skip zones that are clearly not worksheets (images, filter refs)
+                if sname and not any(sname.lower().endswith(ext)
+                                     for ext in ('.jpg', '.jpeg', '.png', '.gif', '.svg')):
+                    resolved_sheets.append(sheet)
+        dash["sheets"] = resolved_sheets
 
     stats = {
         "total": total,
