@@ -288,6 +288,7 @@ Read each generated `.py` file and check for these degeneracies:
 4. **No filters** — check if the sidebar section only contains `pass  # No filters detected`. Compare against `inventory["parameters"]` and worksheet-level filters.
 5. **Uses `st.navigation`** — this requires Streamlit >= 1.36. Many environments have older versions.
 6. **Placeholder table names** — SQL targeting `TARGET_DB.PUBLIC.EXTRACT` or `DB.SCHEMA.TABLE` means table resolution failed.
+7. **Plotly compatibility** — check for `cornerradius` in any `marker=dict(...)` call (breaks Plotly <5.19), duplicate keyword arguments in `update_layout()` (e.g., spreading `**PLOTLY_LAYOUT` that has `margin` AND passing `margin=` again), or CSS `-webkit-background-clip: text` (invisible text in Streamlit webview).
 
 **If ANY of these degeneracies are found, do NOT present the generated files to the user. Proceed to Step 8b instead.**
 
@@ -346,7 +347,7 @@ Generate a **single-file `app.py`** (more robust than multi-file for compatibili
    - Cell-level color badges for categorical fields (e.g., risk categories)
    - Color-tinted row backgrounds keyed to a category column
 
-5. **Charts**: For chart worksheets, use `plotly.express` with the Snowflake color palette.
+5. **Charts**: For chart worksheets, use `plotly.express` or `plotly.graph_objects` with colors extracted from the source BI file.
 
 6. **KPIs**: Use styled HTML `<div>` cards, not plain `st.metric()`.
 
@@ -357,6 +358,55 @@ Generate a **single-file `app.py`** (more robust than multi-file for compatibili
    - Dense table styling (`.dtable` class)
    - Badge/pill components for categorical values
    - Scrollable table containers with max-height
+
+9. **Plotly / Streamlit Compatibility Rules** (MANDATORY — violations break the app):
+
+   These rules are based on real failures observed across multiple BI modernization builds.
+   Violating ANY of them produces runtime errors in common Streamlit+Plotly environments.
+
+   a. **No `cornerradius` in Plotly bar markers.** `marker=dict(cornerradius=N)` was added
+      in Plotly ≥ 5.19. Many Streamlit environments ship Plotly 5.9–5.18. NEVER use it.
+      Instead, bars render with square corners (the default).
+
+   b. **No duplicate keyword arguments in `update_layout()`.** When spreading a shared
+      layout dict (`**PLOTLY_LAYOUT`) that contains `margin`, do NOT also pass `margin=`
+      as a separate kwarg. Python raises `TypeError: got multiple values for keyword
+      argument 'margin'`. If you need a custom margin for one chart, build a one-off
+      layout dict or call `update_layout` twice.
+
+   c. **CSS `background-clip: text` does not work in Streamlit's webview.** Text styled
+      with `-webkit-background-clip: text; -webkit-text-fill-color: transparent` renders
+      as invisible. For gradient-styled headings, use a plain `color:` on the `<h1>` or
+      use an SVG/image instead.
+
+   d. **`st.navigation()` / `st.Page()` requires Streamlit ≥ 1.36.** Use `st.radio()`
+      in the sidebar for page navigation — works on Streamlit 1.24+.
+
+   e. **Plotly `go.Figure` shared layout pattern.** Define a `PLOTLY_LAYOUT` dict once and
+      spread it, but keep `margin`, `height`, `title` OUT of the shared dict if any chart
+      needs to override them. Recommended shared dict:
+      ```python
+      PLOTLY_LAYOUT = dict(
+          paper_bgcolor="rgba(0,0,0,0)",
+          plot_bgcolor="rgba(0,0,0,0)",
+          font=dict(color=TEXT_WHITE, family="Inter, sans-serif"),
+          margin=dict(t=40, b=30, l=40, r=20),
+      )
+      ```
+      For charts needing different margins (e.g., small KPI bars), build a separate dict
+      or call `fig.update_layout(margin=dict(...))` as a second call AFTER the first.
+
+   f. **Always test Plotly features against the OLDEST likely version.** Assume Plotly 5.9+.
+      Avoid: `cornerradius`, `marker.pattern.fgopacity`, `legendgrouptitle`,
+      `minor` axis properties. These are 5.15+ or 5.19+ features.
+
+   g. **Choropleth maps for geographic data.** When the TWB has `Multipolygon` marks,
+      use `px.choropleth()` with `locationmode="country names"`. Plotly does not support
+      Tableau-style filled polygons natively.
+
+   h. **Heatmaps for Square/Circle marks.** When the TWB uses Square or Circle mark class
+      with a color encoding on a measure, render as `go.Heatmap()` with `texttemplate="%{text}"`.
+      Map the Tableau color gradient to a Plotly `colorscale` list.
 
 **Step 8b.4: Preview**
 
