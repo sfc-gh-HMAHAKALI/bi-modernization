@@ -64,10 +64,10 @@ python3 -m modules.cli generate-streamlit /tmp/enr.json --visuals /tmp/visuals.j
 python3 -m modules.cli build-agent /tmp/enr.json --database MY_DB --schema PUBLIC -o /tmp/agent/
 ```
 
-### Tableau inspector
+### Migration report
 
-Tableau parsing runs through an inspector that also produces a standalone migration report.
-Read it before building — it leads with the warnings that change scope.
+Where a source has a deep extractor, `parse` also produces a standalone migration report.
+Read it before building — it leads with the findings that change project scope.
 
 ```bash
 python3 -m modules.tableau.inspector "/path/to/wb.twb" --format markdown
@@ -75,11 +75,30 @@ python3 -m modules.tableau.inspector "/path/to/wb.twb" --format markdown
 
 It reports data blending, non-Snowflake connections, orphan worksheets, high-complexity
 calculations, member aliases, hand-written colour legends, dashboard background colours, and
-how many fields never reach a dashboard. Its structured detail is attached to the inventory
-under `tableau_inspection` (LOD and table-calc translation prescriptions, filter
-order-of-operations staging, layout ratios, visual styles, field reach).
+how many fields never reach a dashboard. The structured detail rides along on the inventory
+(LOD and table-calc translation prescriptions, filter order-of-operations staging, layout
+ratios, visual styles, field reach).
 
-`BIM_TABLEAU_PARSER=legacy` forces the older parser if a workbook regresses.
+### Extractor maturity
+
+All five sources parse to the same inventory contract, so everything downstream — semantic
+YAML, agents, Streamlit, React — works identically regardless of where the dashboards came
+from. What differs is how much a given extractor can tell you about *translation*.
+
+| Source | Today |
+|---|---|
+| Tableau | Deep. Expression classification, translation prescriptions, filter staging, layout ratios, visual styles, field reach, migration report. |
+| Power BI | Model, DAX measures, report-page visuals and field bindings. |
+| Looker | Views, explores, dimensions, measures, joins. |
+| Denodo | VQL views and derived-view lineage. |
+| SAP BO | Universe objects from a JSON export. |
+
+Tableau is further along only because it was the first one driven end to end against a real
+customer workbook set. The depth is not Tableau-specific by design — the same treatment is
+intended for the others, and adding a new source means a new parser package plus a
+`_from_<source>` normalizer in `output/inventory.py`.
+
+`BIM_TABLEAU_PARSER=legacy` forces the older Tableau parser if a workbook regresses.
 
 ## Chart engines
 
@@ -121,9 +140,11 @@ labels do not collide.
 - Merged the `semantic-extraction` skill in flat at the same module depth: all five source
   parsers, semantic YAML generation, reports, and si_agent are now in-tree. No second install,
   and `agent_builder` no longer shells out to another skill.
-- Tableau extraction now backed by an inspector behind a contract-preserving adapter. On the
-  FBR reference workbook this moves extraction from 68 dimensions / 32 facts / 0 metrics to
-  68 / 110 / 44, and surfaces 122 calculation translation prescriptions including 23 LODs.
+- Much deeper Tableau extraction, behind a contract-preserving adapter so the inventory
+  contract is unchanged. On the FBR reference workbook this moves extraction from
+  68 dimensions / 32 facts / 0 metrics to 68 / 110 / 44, and surfaces 122 calculation
+  translation prescriptions including 23 LODs. The other four sources are unaffected and
+  are the next candidates for the same treatment.
 - Altair chart engine, now the default; Plotly retained for the marks Vega-Lite does not cover.
 - Calculation translation, Tableau's nine-stage order of operations, and the
   `a / NULLIF(b, 0)` division-parity rule documented in SKILL.md.
