@@ -613,7 +613,78 @@ If issues are found, fix them before presenting to the user.
 
 **ALWAYS offer a local preview before deployment.**
 
-### Step 8c: Deploy (after preview is approved)
+### Step 8c: Reconcile the numbers (gate — do this before deploying)
+
+A dashboard that looks right and totals wrong is worse than no dashboard, because people
+act on it. Reconcile before deploying, and follow `references/migration-qa.md` for the full
+procedure. Reconciliation is a numeric exercise; a visual comparison cannot substitute for it.
+
+**Run the automated render gate first.** It is cheap and catches the failures that would
+otherwise waste a review cycle:
+
+```bash
+cd "$BIM_DIR"
+BIM_APP_DIR=<generated app dir> python3 tests/run_all.py
+```
+
+This executes every page against a mocked Streamlit and asserts: no page raises, no KPI is
+NaN or Inf, every page survives a filter that matches zero rows, cross-filtered and
+drilled states render, grids carry a derived `column_config`, exports are non-empty, month
+axes are in calendar order, and value labels do not collide. A page that raises here would
+have raised in front of the user.
+
+**Then reconcile the numbers.** For each dashboard, pick the figures a user would check
+first — the headline KPIs, one total per grain, and the worst-performing row — and compare
+against the source with filters in a stated, identical state:
+
+| Check | Why it is the one that catches drift |
+|---|---|
+| Grand total per measure, no filters | Catches join fan-out and duplicated rows |
+| One total per dimension grain | Catches a wrong `GROUP BY` or a lost filter stage |
+| A ratio (attainment, share, margin) | Catches per-row averaging instead of re-aggregation |
+| A period-over-period delta | Catches an off-by-one on the date axis or a boundary rule |
+| A row with a NULL or zero denominator | Catches `DIV0` masquerading as a real zero |
+| The single largest and smallest row | Catches ordering, ties, and top-N filter semantics |
+| A FIXED-LOD-derived figure with a dimension filter active | Catches the order-of-operations trap |
+
+Record actual numbers, not verdicts. "Matches" is not evidence; `4,182,566 vs 4,182,566`
+is. For every mismatch, name the cause — source freshness, export grain, calculation
+translation, filter timing, timezone or locale, rounding, or a genuine defect. "Close
+enough" is not a cause.
+
+**Expect legitimate differences, and say so.** Masking policies and row-access policies
+apply per executing role. If the Tableau extract was built by a broad service account and
+the Streamlit app runs as the viewer's role, the app can correctly show different numbers.
+That is governance working, not a migration defect — but it must be stated explicitly in
+the fidelity report, or the first user to notice will file it as a bug.
+
+**Visual comparison, after the numbers agree:**
+
+```bash
+python3 -m pip install Pillow   # QA-time only, not a deployment dependency
+python3 scripts/visual_compare.py \
+  evidence/tableau/<dashboard>.png evidence/streamlit/<dashboard>.png \
+  --output-dir evidence/visual/<dashboard>
+```
+
+Capture both sides under the same viewport, data snapshot, filter state, and theme, or the
+comparison means nothing. Use the pixel score to *locate* differences, never to decide
+correctness — a low score on a chart showing wrong numbers is worse than useless. Never
+synthesize a reference image from your own implementation.
+
+**Deploy prerequisites — check these before promising a deployment:**
+
+- SPCS must be available in the customer's cloud and region. Confirm it before designing
+  around the container runtime.
+- `SYSTEM_COMPUTE_POOL_CPU` exists by default and permits Streamlit workloads, so a simple
+  deployment needs no new compute pool.
+- Size `MAX_NODES` against *concurrent* apps, not deployed apps. Ten deployed dashboards
+  used by two people at a time is not a ten-node workload.
+- The app's role needs `SELECT` on every underlying table and `USAGE` on any semantic view.
+  A missing grant surfaces as an empty chart, not an error, which is why the kit renders a
+  deliberate no-permission state instead of a blank panel.
+
+### Step 8d: Deploy (after preview and reconciliation are approved)
 
 Then invoke the Streamlit skill for deployment:
 ```python
@@ -623,7 +694,7 @@ skill(command="developing-with-streamlit-in-snowflake")
 Tell it: "I have a Streamlit app at /tmp/bim_streamlit/.
 Please help me deploy it to Snowflake. The entry point is app.py (or home.py if multi-file)."
 
-### Step 8d: Fidelity Report
+### Step 8e: Fidelity Report
 
 **ALWAYS present a fidelity report before deployment.** This tells the user exactly
 what is faithful to the original and what is approximated.
@@ -664,6 +735,14 @@ Cannot reproduce in Streamlit:
    - Tableau Server/Cloud auth integration
    - Dynamic LOD expressions (if any were flagged as manual)
    - Tableau storyboard tab animation
+
+Numeric reconciliation:
+   - Render gate: [N] pages, [N] raised, [N] KPIs checked for NaN/Inf
+   - Figures compared: [list each as "<label>: <source value> vs <app value>"]
+   - Mismatches: [each with its named cause, or "none"]
+   - Not translatable: [each calculation with a blocker, and what was agreed]
+   - Legitimate differences: [e.g. masking or row-access policy applies per role,
+     so the app shows the viewer's entitled slice rather than the extract's]
 ```
 
 Ask the user: "Does this look acceptable? Any colors or layouts to adjust before deployment?"
