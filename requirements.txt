@@ -33,5 +33,9 @@ openpyxl>=3.1.2
 snowflake-connector-python>=3.6.0
 
 # ── Optional ───────────────────────────────────────────────────────────────
+# Visual QA comparison (scripts/visual_compare.py). Laptop-only: this never runs
+# inside Streamlit in Snowflake, so it is not a deployment dependency.
+# pillow>=10.0.0
+#
 # JDBC bridge for Denodo VDP (live VDP connections only; requires a Java runtime)
 # jaydebeapi>=1.2.3
