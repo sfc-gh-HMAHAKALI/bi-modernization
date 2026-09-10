@@ -130,7 +130,7 @@ def generate_semantic_view_yaml(
             if syns:
                 syn_str = ", ".join(f'"{s}"' for s in syns[:5])
                 lines.append(f"{prefix}  synonyms: [{syn_str}]")
-            lines.append(f"{prefix}  expr: {_format_expr(expr, dim.get('table', ''), name)}")
+            lines.append(f"{prefix}  expr: {_yaml_scalar(_format_expr(expr, dim.get('table', ''), name))}")
             lines.append(f"{prefix}  data_type: {dt}")
             if desc:
                 lines.append(f"{prefix}  description: \"{_escape_yaml_string(desc)}\"")
@@ -168,7 +168,7 @@ def generate_semantic_view_yaml(
             if syns:
                 syn_str = ", ".join(f'"{s}"' for s in syns[:5])
                 lines.append(f"{prefix}  synonyms: [{syn_str}]")
-            lines.append(f"{prefix}  expr: {_format_expr(expr, fact.get('table', ''), name)}")
+            lines.append(f"{prefix}  expr: {_yaml_scalar(_format_expr(expr, fact.get('table', ''), name))}")
             lines.append(f"{prefix}  data_type: {dt}")
             if desc:
                 lines.append(f"{prefix}  description: \"{_escape_yaml_string(desc)}\"")
@@ -193,7 +193,7 @@ def generate_semantic_view_yaml(
             if syns:
                 syn_str = ", ".join(f'"{s}"' for s in syns[:5])
                 lines.append(f"{prefix}  synonyms: [{syn_str}]")
-            lines.append(f"{prefix}  expr: {_format_expr(expr, metric.get('table', ''), name)}")
+            lines.append(f"{prefix}  expr: {_yaml_scalar(_format_expr(expr, metric.get('table', ''), name))}")
             lines.append(f"{prefix}  data_type: {dt}")
             if desc:
                 lines.append(f"{prefix}  description: \"{_escape_yaml_string(desc)}\"")
@@ -355,6 +355,20 @@ def _sanitize_name(name: str) -> str:
 def _escape_yaml_string(s: str) -> str:
     """Escape special characters for YAML double-quoted strings."""
     return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _yaml_scalar(s: str) -> str:
+    """Emit a value as a YAML scalar that is always safe to re-parse.
+
+    Source expressions are not tame: Tableau calculated fields are frequently
+    multi-line, and they contain quotes, colons, braces and leading brackets.
+    Written bare, a single multi-line formula terminates the document and the
+    whole semantic view fails to load -- which is exactly what happened once the
+    inspector started extracting all 122 calculated fields instead of a handful.
+
+    Always quoting is safe: a plain identifier means the same thing quoted.
+    """
+    return f'"{_escape_yaml_string(str(s))}"'
 
 
 def _format_expr(expr: str, table: str, name: str = "") -> str:

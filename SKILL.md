@@ -4,8 +4,9 @@ description: >
   End-to-end BI modernization suite. Takes Tableau, Power BI, Looker, Denodo, or SAP BO
   source files and generates Snowflake Semantic Views, Cortex Agents, a Streamlit-in-Snowflake
   app, and/or a React/SPCS enterprise dashboard — with optional agent chat embedded in the app.
-  Orchestrates semantic-extraction, agent-studio, developing-with-streamlit-in-snowflake,
-  snowflake-apps, and sar-actions-desktop sub-skills.
+  Self-contained: source parsing and semantic YAML generation are built in. Delegates to
+  agent-studio, developing-with-streamlit-in-snowflake, snowflake-apps, and
+  sar-actions-desktop for deployment.
 ---
 
 # BI Modernization Suite
@@ -15,23 +16,26 @@ Snowflake Semantic Views, and then let the user choose from: Cortex Agents, Stre
 app, React/SPCS enterprise app, or any combination — with optional Cortex Agent chat embedded
 in the app layer.
 
-This skill DELEGATES to other CoCo skills for deployment steps. You must invoke those skills
-at the appropriate steps using the skill tool.
+Source extraction is part of this skill — there is no separate skill to install. It delegates
+only for *deployment*, and you must invoke those skills at the appropriate steps using the
+skill tool.
 
-## Prerequisites Check
+## Setup
 
-Before starting, verify the semantic-extraction skill is installed:
 ```bash
-ls ~/.snowflake/cortex/skills/semantic-extraction/modules/cli.py
-```
-
-If it does not exist, tell the user to install it first and stop.
-
-Set a variable for convenient reuse:
-```bash
-SEM_EX_DIR="$HOME/.snowflake/cortex/skills/semantic-extraction"
 BIM_DIR="$HOME/.snowflake/cortex/skills/bi-modernization"
+cd "$BIM_DIR"
 ```
+
+Install dependencies if a parse fails on a missing module:
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+Everything runs from one CLI. `python3 -m modules.cli --help` lists all commands; the two
+halves are extraction (`crawl`, `parse`, `classify`, `generate-yaml`, `report`, `compare`,
+`seed-data`, `si-agent`, `test-connection`) and generation (`enrich-charts`,
+`extract-visuals`, `generate-streamlit`, `generate-react`, `build-agent`, `preview`).
 
 ---
 
@@ -41,19 +45,19 @@ Ask the user what they're starting from:
 
 ```
 ask_user_question:
-  - "Are you starting from BI source files or an existing inventory.json from semantic-extraction?"
+  - "Are you starting from BI source files or an existing inventory.json?"
     type: options
     options:
       - label: "BI source files (Tableau, Power BI, Looker, etc.)"
         description: "I'll parse the files and generate the inventory from scratch."
       - label: "Existing inventory.json"
-        description: "I already ran semantic-extraction — skip straight to generation."
+        description: "Skip straight to generation."
 
   - "Which BI tool(s) are the source files from?"
     type: options (only ask if source files chosen)
     multiSelect: true
     options:
-      - label: "Tableau (.twb / .twbx)"
+      - label: "Tableau (.twb / .twbx / .tds / .tdsx)"
       - label: "Power BI (.pbix / .pbit / .pbip)"
       - label: "Looker (LookML project folder)"
       - label: "Denodo (VQL export)"
@@ -62,24 +66,49 @@ ask_user_question:
 
 Ask for the file/folder paths.
 
+**If the user gave a directory rather than specific files**, find the sources first rather
+than guessing:
+```bash
+python3 -m modules.cli crawl "<directory>" --type tableau
+```
+
+### Source routing
+
+Extraction depth differs by source, and it changes what you can promise. Tell the user which
+tier they are in before building:
+
+| Source | Extractor | Depth |
+|---|---|---|
+| Tableau | `modules/tableau/inspector.py` | Deepest. LOD classification, untranslatable-function detection, table calcs, filter order-of-operations staging, dashboard layout ratios, per-member colours, field reach. Use `--format markdown` for a migration report. |
+| Power BI | `modules/powerbi/` (pbixray) | Model, DAX measures, report-page visuals and field bindings. No DAX-to-SQL prescriptions. |
+| Looker | `modules/looker/` (lkml) | Views, explores, dimensions, measures, joins. LookML is already close to a semantic layer. |
+| Denodo | `modules/denodo/vql_parser.py` | VQL views and derived-view lineage. |
+| SAP BO | `modules/businessobjects/` | Universe objects from a JSON export; requires an export step outside this skill. |
+
+For **Tableau**, run the inspector's markdown report and surface its warnings before doing
+anything else — see Step 8's "Deep analysis of the source". For the other four, expect to
+read the source's own expression language yourself; only Tableau has a prescription engine.
+
+Mixed sources are supported: parse each separately, then `compare` or merge the inventories.
+
 ---
+
 
 ## Step 2: Parse BI Sources (skip if existing inventory.json provided)
 
-**Load the semantic-extraction skill first**, then run the parse:
-
-```python
-skill(command="semantic-extraction")
-```
-
-After loading the skill, use its parse command:
+Run the parse:
 ```bash
-cd "$SEM_EX_DIR"
+cd "$BIM_DIR"
 python3 -m modules.cli parse "<source_path>" --type <tableau|powerbi|looker|denodo|businessobjects> \
   -o /tmp/bim_inventory.json
 ```
 
-For multiple source types, run parse once per type and merge by hand (combine the JSON arrays).
+For Tableau this uses the inspector automatically, and attaches its richer detail to the
+inventory under `tableau_inspection` (translation prescriptions, filter staging, layout
+ratios, visual styles, field reach). `BIM_TABLEAU_PARSER=legacy` forces the older parser if
+a workbook ever regresses.
+
+For multiple source types, run parse once per type, then merge or `compare` the inventories.
 
 Review the parse output for errors. If there are critical errors, show them to the user and ask
 whether to proceed with partial results.
@@ -217,10 +246,11 @@ If yes, ask for the Cortex Search service fully-qualified names (e.g., DB.SCHEMA
 
 ## Step 6: Generate Semantic Views (if selected)
 
-Generate the YAML files using semantic-extraction:
+Generate the YAML files. Note the command is `generate-yaml`, named to stay unambiguous
+alongside `generate-streamlit` and `generate-react`:
 ```bash
-cd "$SEM_EX_DIR"
-python3 -m modules.cli generate /tmp/bim_inventory.json -o /tmp/bim_yaml/
+cd "$BIM_DIR"
+python3 -m modules.cli generate-yaml /tmp/bim_inventory.json -o /tmp/bim_yaml/
 ```
 
 Review the YAML files. For deployment, invoke the agent-studio skill which handles
@@ -835,7 +865,7 @@ Present a final summary showing:
 - What was generated (semantic views, agent, Streamlit app, React app)
 - File locations for generated artifacts
 - Next steps (deployment commands, links to relevant Snowflake docs)
-- Tip: "Run the semantic-extraction skill again after adding new BI dashboards to keep your
+- Tip: "Re-run the parse after adding new BI dashboards to keep your
   Snowflake layer in sync."
 
 ---

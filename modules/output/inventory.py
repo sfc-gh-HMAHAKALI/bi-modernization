@@ -5,6 +5,7 @@ structure that the YAML generator consumes.
 """
 
 import json
+import re
 from typing import Any
 
 from ..common.logger import get_logger
@@ -231,13 +232,50 @@ def _from_tableau(parsed: dict, inv: dict) -> None:
     for ds in parsed.get("datasources", []):
         ds_name = ds.get("name", "UNKNOWN")
 
-        # Tables
+        # Tables. De-duplicated: Tableau repeats a relation per usage, so a
+        # published datasource would otherwise contribute the same placeholder
+        # table many times.
+        ds_table_names: list[str] = []
         for table in ds.get("tables", []):
+            norm = table.get("name", "").strip("[]").replace(".", "_").upper()
+            if not norm or norm in ds_table_names:
+                continue
+            ds_table_names.append(norm)
             inv["tables"].append({
-                "name": table.get("name", "").strip("[]").replace(".", "_").upper(),
+                "name": norm,
                 "physical_table": table.get("name", ""),
                 "connection": ds.get("connection", {}),
             })
+
+        # Columns must be keyed to the same vocabulary as `tables`, or
+        # _filter_inventory_by_table matches nothing and the split-by-table path
+        # writes zero semantic views. Tableau columns do not declare their table,
+        # so: a single-table datasource attributes them to that table, and a
+        # multi-table one falls back to the datasource, which is then registered
+        # as a table so the grouping still has something to match.
+        if len(ds_table_names) == 1:
+            col_table = ds_table_names[0]
+        else:
+            # A datasource caption is prose -- "CUSTOMER_FILE (DATAMART)+ (FINANCE)"
+            # -- so reduce it to a legal Snowflake identifier before it becomes a
+            # table name and a semantic view filename.
+            col_table = re.sub(r"[^A-Za-z0-9_]+", "_", ds_name).strip("_").upper()
+            col_table = re.sub(r"_+", "_", col_table) or "UNKNOWN"
+            if col_table[0].isdigit():
+                col_table = f"T_{col_table}"
+            # Tableau exposes parameters as a pseudo-datasource literally named
+            # "Parameters" with no relations. It is not a table and must not
+            # become one, or every inventory grows a junk PARAMETERS view.
+            # Likewise skip a datasource that contributes no columns.
+            is_parameters = col_table == "PARAMETERS"
+            if (col_table not in ds_table_names
+                    and ds.get("columns")
+                    and not is_parameters):
+                inv["tables"].append({
+                    "name": col_table,
+                    "physical_table": ds_name,
+                    "connection": ds.get("connection", {}),
+                })
 
         # Joins
         for join in ds.get("joins", []):
@@ -263,7 +301,7 @@ def _from_tableau(parsed: dict, inv: dict) -> None:
                 name=col.get("caption", col_name),
                 expr=col.get("formula", f"{ds_name}.{col_name}"),
                 data_type=_map_tableau_type(col.get("datatype", "string")),
-                table=ds_name,
+                table=col_table,
                 description=col.get("desc", ""),
                 complexity=complexity,
                 original=col,

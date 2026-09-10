@@ -8,7 +8,7 @@ Two halves under one package:
                   agent_builder, preview, and the bim_ui component kit.
 """
 
-__version__ = "0.7.0"
+__version__ = "2.0.0"
 
 # Version of the semantic-extraction tree merged in at the same module depth.
 __extraction_version__ = "0.6.0"
