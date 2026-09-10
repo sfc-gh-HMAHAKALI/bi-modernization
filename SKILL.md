@@ -285,18 +285,103 @@ fails validation and wastes a round-trip. The standard below IS the generator.
 **From the original source file** (TWB, PBIX, etc.) — re-read it directly to extract
 what the parser missed:
 
-For **Tableau (.twb)**:
-- Parse `<worksheet>` elements: extract the `<mark class="...">` for each
-- Parse `<column>` elements within each datasource: extract `caption`, `datatype`, `role`,
-  and `<calculation formula="...">` for calculated fields
-- Parse `<relation>` elements: extract the actual custom SQL queries
-- Parse `<dashboard>` zones: match zone worksheet references to worksheet names
-- Parse `<filter>` elements: extract which fields are used as filters and their allowed values
-- Identify the dashboard layout pattern (storyboard? standard? tabbed?)
+For **Tableau (.twb / .twbx / .tds / .tdsx)** — do NOT hand-parse the XML. Run the
+inspector, which already models all of it and reports what a naive parse misses:
+
+```bash
+# Human-readable migration report — read this first, it leads with the warnings
+python3 -m modules.tableau.inspector "<source>" --format markdown
+
+# Full structured detail
+python3 -m modules.tableau.inspector "<source>" --format json > /tmp/bim_inspect.json
+```
+
+`parse --type tableau` uses the inspector automatically, so its output is also on the
+inventory under `tableau_inspection`. Read these keys:
+
+| Key | What it gives you |
+|---|---|
+| `translation` | Per-calculation LOD kind, table calcs, blockers, and a prescribed action |
+| `filters` | Filter definitions with their order-of-operations stage |
+| `layout` | Per-dashboard container tree with `st.columns` width ratios |
+| `visual_styles` | Palettes, per-member colours, dashboard background colours |
+| `worksheet_marks` | Mark type, rows/cols shelves, and the suggested Streamlit chart |
+| `field_usage` | Which fields actually reach a dashboard, and which are stranded |
+
+The inspector's warnings are the highest-value output. Surface them to the user before
+building: data blending, non-Snowflake connections, orphan worksheets, high-complexity
+calculations, member aliases, hand-written colour legends in text boxes, and fields that
+never reach a dashboard. On the FBR reference workbook it reported that 117 of 222 fields
+reach no dashboard — translating those would have created parity obligations for things
+nobody looks at.
 
 For **Power BI (.pbix / .pbit)**:
 - Parse report page visuals for chart types and field bindings
 - Extract DAX measures and their expressions
+
+### Translate calculations before building anything
+
+Numbers that disagree with the source are the only migration failure users care about.
+Layout can be corrected later; a wrong total destroys trust immediately. So translate and
+reconcile calculations FIRST, and treat `references/calculation-translation.md` as the
+authority. Work the `tableau_inspection.translation` list in descending `complexity_score`,
+because that ordering front-loads the calculations most likely to be wrong.
+
+**Tableau's order of operations is not SQL's.** Tableau applies nine stages in a fixed
+sequence, and three of them are where numbers silently drift:
+
+1. Extract filters
+2. Datasource filters
+3. **Context filters** — these run BEFORE FIXED LODs, so a FIXED LOD sees context-filtered
+   data but ignores ordinary dimension filters
+4. Sets
+5. **FIXED LODs**
+6. **Dimension filters** — these do NOT affect a FIXED LOD computed at stage 5
+7. INCLUDE / EXCLUDE LODs
+8. Measure filters
+9. Table calculations — these run LAST, on the aggregated result
+
+The trap: a dimension filter in the app's sidebar looks like it should narrow a FIXED LOD,
+and in Tableau it does not. If you apply your Streamlit filters to the frame before
+computing a FIXED-LOD equivalent, your number will differ from Tableau's and the difference
+will look random. Decide per calculation which stage its filters belong to, and say so in
+the fidelity report.
+
+**Translation patterns:**
+
+| Tableau | Snowflake | Note |
+|---|---|---|
+| `{FIXED [Dim] : SUM([M])}` | `SUM(m) OVER (PARTITION BY dim)` | Not affected by dimension filters |
+| `{INCLUDE [Dim] : SUM([M])}` | Subquery at the finer grain, then re-aggregate | Adds a grain below the viz |
+| `{EXCLUDE [Dim] : SUM([M])}` | `SUM(m) OVER (PARTITION BY <viz dims minus Dim>)` | Coarser than the viz grain |
+| `WINDOW_SUM`, `RUNNING_SUM`, `INDEX()`, `RANK()` | Window functions with an explicit `ORDER BY` | Tableau's default addressing is the *table layout*; state it explicitly |
+| `LOOKUP([M], -1)` | `LAG(m) OVER (ORDER BY ...)` | Partition must match Tableau's addressing |
+| `TOTAL([M])` | `SUM(m) OVER ()` | Whole-partition total |
+| `IIF`, `IF/THEN/ELSEIF` | `IFF`, `CASE WHEN` | |
+| `ZN([M])` | `COALESCE(m, 0)` | |
+| `DATETRUNC('month', d)` | `DATE_TRUNC('MONTH', d)` | |
+| `DATEDIFF('day', a, b)` | `DATEDIFF('day', a, b)` | Tableau counts boundary crossings; verify on a known pair |
+| `[a] / [b]` | `a / NULLIF(b, 0)` | See below — this one matters |
+
+**Division parity.** Tableau returns null when the denominator is zero; Snowflake raises a
+division-by-zero error. Always write `a / NULLIF(b, 0)`.
+
+Do NOT use `DIV0` or `DIV0NULL`. Both return 0, and a zero is not a null: it gets counted in
+a `COUNT`, dragged through an `AVG`, and rendered as "0%" attainment where the source showed
+a blank. That is a silent, plausible-looking wrong answer, which is the worst kind.
+
+**Untranslatable functions.** When the inspector reports a `blockers` entry, there is no SQL
+equivalent — typically `SCRIPT_REAL`/`SCRIPT_STR` (R/Python integration), `MODEL_QUANTILE`,
+`MODEL_PERCENTILE`, or a spatial function. Do not invent an approximation and ship it as
+parity. Name the calculation, state that it is not translatable, and ask the user whether to
+drop the field, precompute it upstream, or accept a documented gap.
+
+**Aggregation grain and fan-out.** A join that duplicates rows inflates every `SUM` downstream,
+and it will look like a plausible number rather than an error. When a plan or quota table joins
+one-to-many against a fact, carry the plan value on exactly ONE row per group and assert it —
+the reference app's test suite checks `plan carried on exactly one row per month`. Ratios must
+be computed from re-aggregated numerator and denominator, never averaged from per-row ratios.
+
 
 ### Build the Streamlit app — Enterprise Dashboard Standard
 
