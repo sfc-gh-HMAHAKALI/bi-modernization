@@ -21,7 +21,11 @@ requests>=2.28.0
 # Semantic View YAML
 pyyaml>=6.0
 
-# Dashboard generation
+# Charting. Altair is the default engine and is already a hard Streamlit
+# dependency, so a generated app needs no External Access Integration to draw.
+# Plotly is the opt-in engine for choropleth/treemap/sunburst/sankey/gauge and
+# WebGL scatter; it DOES require an EAI in Streamlit in Snowflake.
+altair>=5.0.0
 plotly>=5.22.0
 pandas>=2.0.0
 jinja2>=3.1.3

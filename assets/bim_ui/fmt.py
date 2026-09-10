@@ -83,6 +83,28 @@ class NumberFormat:
             return f"{self.prefix}%{{y:.3s}}{self.suffix}"
         return f"{self.prefix}%{{y:,.{self.decimals}f}}{self.suffix}"
 
+    # ── Vega-Lite / Altair interop ──
+
+    def vega_format(self) -> str:
+        """d3-format string for Altair axes and tooltips.
+
+        Vega-Lite takes a bare d3 spec rather than Plotly's templated form, and
+        has no prefix/suffix properties -- a currency symbol has to be baked into
+        the format string itself. Keeping this beside plotly_axis/plotly_hover is
+        what stops an axis tick, a tooltip, a KPI card and a grid cell from
+        showing the same number four different ways.
+        """
+        if self.kind == "percent":
+            return f"{self.prefix}.{self.decimals}%{self.suffix}"
+        if self.compact:
+            # "~s" is d3's SI prefix with insignificant zeros trimmed: 0 -> "0",
+            # 200 -> "200", 1000 -> "1k", 4.2e6 -> "4.2M". Plain ".3s" pads to
+            # three significant digits and produces a visibly inconsistent axis
+            # -- "$0.00, $200, $1.00k" on the same scale.
+            return f"{self.prefix}~s{self.suffix}"
+        spec = f",.{self.decimals}f" if self.thousands else f".{self.decimals}f"
+        return f"{self.prefix}{spec}{self.suffix}"
+
     # ── Streamlit column_config interop ──
 
     def st_number_format(self) -> str:

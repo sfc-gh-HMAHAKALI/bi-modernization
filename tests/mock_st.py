@@ -122,6 +122,10 @@ class MockStreamlit(types.ModuleType):
         self.calls.setdefault("plotly_chart", []).append(k)
         return None
 
+    def altair_chart(self, chart=None, **k):
+        self.calls.setdefault("altair_chart", []).append(k)
+        return None
+
     def download_button(self, label, data=None, **k):
         self.calls.setdefault("download_button", []).append(
             {"label": label, "size": len(data) if data is not None else 0, **k}

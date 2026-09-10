@@ -15,7 +15,8 @@ Layout of the kit:
     fmt         one formatting code path (KPI, axis, tooltip, grid cell agree)
     states      deliberate empty / error / loading / no-permission states
     filters     cross-filter store with exclude-self, URL state, drill-down
-    charts      chart builders with reference lines and computed label headroom
+    charts      engine-agnostic chart facade (Altair default, Plotly opt-in)
+    chart_spec  engine-neutral ChartSpec and shared chart helpers
     grid        native st.dataframe wrapper with column_config and export
     kpi         KPI cards with sparkline and progress-vs-target
     provenance  freshness / row count / source lineage banner
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from . import chart_spec as chart_spec
 from . import charts as charts
 from . import compat as compat
 from . import filters as filters
@@ -46,6 +48,7 @@ from . import theme as theme
 __all__ = [
     "UIContext",
     "apply_theme",
+    "chart_spec",
     "charts",
     "compat",
     "filters",

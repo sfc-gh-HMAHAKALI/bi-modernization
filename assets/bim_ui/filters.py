@@ -297,6 +297,88 @@ class FilterStore:
         self.set(dim, picked)
         return True
 
+    def ingest_altair(
+        self,
+        event: Any,
+        consumer_key: str,
+        *,
+        dimension: str | None = None,
+        selection: str | None = None,
+        additive: bool = False,
+    ) -> bool:
+        """Translate an Altair on_select event into filter state.
+
+        Altair's payload differs from Plotly's in shape: instead of a list of
+        points carrying x/y, Streamlit returns
+        `{"selection": {<selection name>: {<field>: [values]}}}` -- the selected
+        field values directly. That is easier to read correctly, since there is
+        no guessing whether the category sat on x or y.
+
+        Fingerprinted for the same reason as ingest_plotly: Streamlit re-delivers
+        the same payload on every rerun while the marks stay selected, so writing
+        unconditionally would fight a user who just cleared a chip.
+        """
+        dim = dimension or self._emitters.get(consumer_key)
+        if not dim or event is None:
+            return False
+
+        try:
+            sel = (event.get("selection") if isinstance(event, dict)
+                   else getattr(event, "selection", None)) or {}
+        except (AttributeError, TypeError):
+            return False
+
+        # Prefer the named selection; otherwise take whichever one carries data,
+        # so a chart built without an explicit name still cross-filters.
+        payload = sel.get(selection or consumer_key)
+        if payload is None:
+            payload = next((v for v in sel.values() if isinstance(v, dict) and v), {})
+
+        picked: list[Any] = []
+        if isinstance(payload, dict):
+            # Exact field match first; fall back to the sole field present, which
+            # is the common case for a point selection on one dimension.
+            values = payload.get(dim)
+            if values is None and len(payload) == 1:
+                values = next(iter(payload.values()))
+            if isinstance(values, (list, tuple)):
+                picked = [v for v in values if v is not None]
+            elif values is not None:
+                picked = [values]
+        elif isinstance(payload, (list, tuple)):
+            # Some builds deliver a row list rather than a field map.
+            for row in payload:
+                if isinstance(row, dict) and row.get(dim) is not None:
+                    picked.append(row[dim])
+
+        seen: set[Any] = set()
+        picked = [p for p in picked if not (p in seen or seen.add(p))]
+
+        fingerprint = f"{consumer_key}:{json.dumps(picked, default=str, sort_keys=True)}"
+        fp_key = f"_bim_fp:{consumer_key}"
+        if st.session_state.get(fp_key) == fingerprint:
+            return False
+        st.session_state[fp_key] = fingerprint
+
+        if not picked:
+            # An emptied selection means the user deselected in the chart.
+            if self.state.is_active(dim):
+                self.set(dim, None)
+                return True
+            return False
+
+        if additive:
+            merged = self.state.get(dim)
+            for p in picked:
+                if p not in merged:
+                    merged.append(p)
+            picked = merged
+
+        if self.state.get(dim) == picked:
+            return False
+        self.set(dim, picked)
+        return True
+
     def ingest_dataframe(
         self,
         event: Any,

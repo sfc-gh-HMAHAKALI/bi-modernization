@@ -24,8 +24,12 @@ ST = mock_st.install()
 import pandas as pd  # noqa: E402
 
 from bim_ui import UIContext, fmt  # noqa: E402
-from bim_ui import charts, grid, kpi  # noqa: E402
-from bim_ui.charts import ChartSpec  # noqa: E402
+# This suite asserts Plotly figure internals (layout.yaxis.range, trace types),
+# so it targets that engine directly rather than the facade, whose default is
+# Altair. Cross-engine behaviour is covered by test_chart_engines.py.
+from bim_ui import charts_plotly as charts  # noqa: E402
+from bim_ui import grid, kpi  # noqa: E402
+from bim_ui.chart_spec import ChartSpec  # noqa: E402
 from bim_ui.grid import GridSpec  # noqa: E402
 
 FAILS: list[str] = []

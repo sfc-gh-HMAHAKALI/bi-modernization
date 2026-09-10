@@ -218,12 +218,15 @@ mock_st.reset(ST)
 store = F.FilterStore(dimensions=DIMS, namespace="new_bookings_dashboard")
 render("New Bookings Dashboard", "plan", "Plan", store=store)
 
-charts_rendered = ST.calls.get("plotly_chart", [])
+# Charts route through whichever engine is active, so count both surfaces rather
+# than assuming Plotly.
+charts_rendered = ST.calls.get("plotly_chart", []) + ST.calls.get("altair_chart", [])
 check(len(charts_rendered) >= 4, f"dashboard renders multiple charts ({len(charts_rendered)})")
 check(any(c.get("on_select") == "rerun" for c in charts_rendered),
       "at least one chart is wired for cross-filter selection")
+# scrollZoom is a Plotly config concept; Altair does not zoom on scroll by default.
 check(all(c.get("config", {}).get("scrollZoom") is False
-          for c in charts_rendered if "config" in c),
+          for c in ST.calls.get("plotly_chart", []) if "config" in c),
       "scroll zoom disabled so charts do not hijack page scrolling")
 
 grids = ST.calls.get("dataframe", [])

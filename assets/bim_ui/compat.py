@@ -299,6 +299,30 @@ def plotly_chart(fig, *, on_select: str | None = None, **kwargs):
         return st.plotly_chart(fig, **safe)
 
 
+def altair_chart(chart, *, on_select: str | None = None, **kwargs):
+    """st.altair_chart, dropping selection kwargs when unsupported.
+
+    Altair selection support landed alongside Plotly's (1.35), so the same gate
+    applies: on an older Streamlit the chart renders and simply does not
+    cross-filter. Returns None then, which FilterStore.ingest_altair handles.
+    """
+    if on_select is not None and supports("chart_selection"):
+        try:
+            return st.altair_chart(chart, on_select=on_select, **kwargs)
+        except TypeError:
+            pass
+    safe = {k: v for k, v in kwargs.items()
+            if k not in ("selection_mode", "on_select")}
+    try:
+        return st.altair_chart(chart, **safe)
+    except TypeError:
+        # `key` and `theme` are newer than some builds accept; shed them rather
+        # than failing to draw the chart at all.
+        safe.pop("key", None)
+        safe.pop("theme", None)
+        return st.altair_chart(chart, **safe)
+
+
 def dataframe(df, *, on_select: str | None = None, **kwargs):
     """st.dataframe, dropping selection and newer display kwargs when unsupported."""
     if on_select is not None and supports("dataframe_selection"):
