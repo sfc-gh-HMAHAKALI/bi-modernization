@@ -163,6 +163,14 @@ def cmd_parse(args: argparse.Namespace) -> dict:
 
     inventory = build_unified_inventory(parsed, source_type, sf_target or None)
 
+    # Carry the Tableau inspector's extra detail (LOD/table-calc translation
+    # prescriptions, filter order of operations, layout ratios, visual styles,
+    # field reach) onto the inventory under one additive key. build_unified_
+    # inventory only populates the keys it knows, so this would otherwise be
+    # dropped — and it is what the generation path reads for BI parity.
+    if parsed.get("inspection"):
+        inventory["tableau_inspection"] = parsed["inspection"]
+
     # Save if output specified
     output_path = None
     if args.output:
@@ -778,7 +786,16 @@ def _run_parser(path: str, source_type: str) -> dict:
     _ensure_dependencies(source_type)
 
     if source_type == "tableau":
-        from modules.tableau.parser import parse_workbook
+        # The inspector extracts materially more than the legacy parser (LOD
+        # classification, untranslatable functions, table calcs, layout ratios,
+        # visual styles, field reach) and its adapter emits this same contract,
+        # so it is the default. BIM_TABLEAU_PARSER=legacy forces the old path if
+        # a workbook ever regresses.
+        if os.environ.get("BIM_TABLEAU_PARSER", "").lower() == "legacy":
+            log.info("tableau: legacy parser forced via BIM_TABLEAU_PARSER")
+            from modules.tableau.parser import parse_workbook
+            return parse_workbook(path)
+        from modules.tableau.inspector_adapter import parse_workbook
         return parse_workbook(path)
     elif source_type == "looker":
         from modules.looker.parser import parse_lookml_project
