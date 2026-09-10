@@ -113,6 +113,31 @@ For multiple source types, run parse once per type, then merge or `compare` the 
 Review the parse output for errors. If there are critical errors, show them to the user and ask
 whether to proceed with partial results.
 
+### Step 2b: Surface the findings that change scope (Tableau)
+
+Run this and present the findings BEFORE asking the user what to build. These change scope,
+so finding them after the app is built means rework:
+
+```bash
+python3 -m modules.tableau.inspector "<source_path>" --format markdown | head -40
+```
+
+Report each finding that applies, in plain language, and ask the user to decide:
+
+| Finding | Ask the user |
+|---|---|
+| Datasource not on a live Snowflake connection | The data must exist in Snowflake first. Is it already there, and under what name? |
+| Data blending across datasources | Tableau blends left-join at the viz grain. Confirm the join semantics before trusting any total. |
+| Worksheets on no dashboard | Usually out of scope. Confirm before translating them. |
+| Fields that reach no dashboard | Translating them creates parity obligations for things nobody sees. Skip unless asked. |
+| High-complexity calculations | Name them. These are the ones to translate and reconcile first. |
+| Member aliases | The workbook showed labels that differ from stored values. Filters and axis labels must use the aliases. |
+| Hand-written colour legend in a text box | The author recorded a colour convention no encoding element captures. Read it before choosing a palette. |
+| Credential-like attributes in the file | Treat the source as a secret: keep it out of version control and never paste its raw XML anywhere. |
+
+On the FBR reference workbook this reported that 117 of 222 fields reach no dashboard and 30
+worksheets sit on none — roughly half the apparent work was not real work.
+
 ---
 
 ## Step 3: Enrich with Chart Types

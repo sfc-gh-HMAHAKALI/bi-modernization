@@ -64,39 +64,15 @@ python3 -m modules.cli generate-streamlit /tmp/enr.json --visuals /tmp/visuals.j
 python3 -m modules.cli build-agent /tmp/enr.json --database MY_DB --schema PUBLIC -o /tmp/agent/
 ```
 
-### Migration report
-
-Where a source has a deep extractor, `parse` also produces a standalone migration report.
-Read it before building — it leads with the findings that change project scope.
+### Migration report (Tableau)
 
 ```bash
 python3 -m modules.tableau.inspector "/path/to/wb.twb" --format markdown
 ```
 
-It reports data blending, non-Snowflake connections, orphan worksheets, high-complexity
+Reports data blending, non-Snowflake connections, orphan worksheets, high-complexity
 calculations, member aliases, hand-written colour legends, dashboard background colours, and
-how many fields never reach a dashboard. The structured detail rides along on the inventory
-(LOD and table-calc translation prescriptions, filter order-of-operations staging, layout
-ratios, visual styles, field reach).
-
-### Extractor maturity
-
-All five sources parse to the same inventory contract, so everything downstream — semantic
-YAML, agents, Streamlit, React — works identically regardless of where the dashboards came
-from. What differs is how much a given extractor can tell you about *translation*.
-
-| Source | Today |
-|---|---|
-| Tableau | Deep. Expression classification, translation prescriptions, filter staging, layout ratios, visual styles, field reach, migration report. |
-| Power BI | Model, DAX measures, report-page visuals and field bindings. |
-| Looker | Views, explores, dimensions, measures, joins. |
-| Denodo | VQL views and derived-view lineage. |
-| SAP BO | Universe objects from a JSON export. |
-
-Tableau is further along only because it was the first one driven end to end against a real
-customer workbook set. The depth is not Tableau-specific by design — the same treatment is
-intended for the others, and adding a new source means a new parser package plus a
-`_from_<source>` normalizer in `output/inventory.py`.
+how many fields never reach a dashboard.
 
 `BIM_TABLEAU_PARSER=legacy` forces the older Tableau parser if a workbook regresses.
 
