@@ -1,68 +1,49 @@
 """
-Agent builder — extends semantic-extraction's si_agent.py with:
+Agent builder — extends the in-tree si_agent.py with:
   1. Cortex Search tool support
   2. Human-readable preview summary for user review before deployment
   3. Domain count / tool budget enforcement (warn if > 10)
 
-Delegates the base agent spec / domain grouping / DDL generation to
-the semantic-extraction si-agent CLI (called as a subprocess) then
-post-processes the output to add Cortex Search tools and preview text.
+Delegates the base agent spec / domain grouping / DDL generation to the in-tree
+si-agent command, then post-processes the output to add Cortex Search tools and
+preview text.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
-import subprocess
-import sys
 import textwrap
 from pathlib import Path
 from typing import Any
-
-_SEM_EX_DIR = Path.home() / ".snowflake" / "cortex" / "skills" / "semantic-extraction"
 
 
 def _run_si_agent(inventory_path: str, agent_name: str, database: str, schema: str,
                   output_dir: str, assess_only: bool = False,
                   explicit_domains: dict | None = None) -> dict:
     """
-    Call semantic-extraction's si-agent CLI as a subprocess.
-    Returns the parsed JSON output.
+    Run the si-agent command in-process and return its result dict.
+
+    si_agent now lives in this tree (modules/output/si_agent.py), so this calls
+    the command function directly rather than shelling out to a separate skill
+    install. Going through cmd_si_agent rather than the underlying generators
+    keeps the result-dict contract identical to what this module already expects.
     """
-    if not _SEM_EX_DIR.exists():
-        raise RuntimeError(
-            f"semantic-extraction skill not found at {_SEM_EX_DIR}. "
-            "Please install it before using bi-modernization."
-        )
+    from .cli_semex import cmd_si_agent
 
-    cmd = [
-        sys.executable, "-m", "modules.cli", "si-agent",
-        inventory_path,
-        "--agent-name", agent_name,
-        "--database", database,
-        "--schema", schema,
-        "--output", output_dir,
-    ]
-    if assess_only:
-        cmd.append("--assess-only")
-    if explicit_domains:
-        cmd += ["--domains", json.dumps(explicit_domains)]
-
-    result = subprocess.run(
-        cmd,
-        cwd=str(_SEM_EX_DIR),
-        capture_output=True,
-        text=True,
-        timeout=120,
+    args = argparse.Namespace(
+        input=inventory_path,
+        agent_name=agent_name,
+        database=database,
+        schema=schema,
+        output=output_dir,
+        customer=None,
+        assess_only=assess_only,
+        domains=json.dumps(explicit_domains) if explicit_domains else None,
+        execute=False,
+        connection=None,
     )
-
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        raise RuntimeError(
-            f"si-agent returned non-JSON output.\n"
-            f"stdout: {result.stdout[:500]}\n"
-            f"stderr: {result.stderr[:500]}"
-        )
+    return cmd_si_agent(args)
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +217,7 @@ def build(
 
     work_dir = output_dir or tempfile.mkdtemp(prefix="bim_agent_assess_")
 
-    # --- Call semantic-extraction si-agent via subprocess ---
+    # --- Call the in-tree si-agent command ---
     si_result = _run_si_agent(
         inventory_path=inventory_path,
         agent_name=agent_name,

@@ -4,11 +4,26 @@ bi-modernization CLI — entry point for all code-generation commands.
 Usage:
     python3 -m modules.cli <command> [options]
 
-Commands:
+Extraction commands (source BI -> inventory / semantic YAML):
+    crawl                   Discover source files under a directory
+    parse                   Parse source files into inventory.json
+    classify                Classify inventory complexity
+    generate-yaml           Generate Semantic View YAML
+    report                  Generate HTML report + Excel workbook
+    compare                 Compare two inventories
+    generate-from-workbook  One-shot workbook -> semantic YAML
+    seed-data               Generate seed / sample data
+    si-agent                Generate Snowflake Intelligence agent artifacts
+    test-connection         Test live source connectivity
+
+Generation commands (inventory -> apps / agents):
     enrich-charts       Enrich inventory.json with chart type per sheet/visual
+    extract-visuals     Extract colors, layout and formats from BI source files
     generate-streamlit  Generate multi-page Streamlit-in-Snowflake app
     generate-react      Generate Next.js + ECharts app for Snowflake App Runtime
     build-agent         Build Cortex Agent spec + deployment SQL (extends si_agent)
+    preview             Launch a local preview using synthetic data
+    restore-react       Restore production snowflake.ts after a React preview
 """
 
 from __future__ import annotations
@@ -19,6 +34,8 @@ import logging
 import sys
 import time
 from pathlib import Path
+
+from . import cli_semex
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -420,7 +437,16 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="python3 -m modules.cli",
         description="bi-modernization: BI source → Snowflake AI/BI outputs",
     )
+    p.add_argument(
+        "--log-level", default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging verbosity (used by the extraction commands).",
+    )
     sub = p.add_subparsers(dest="command")
+
+    # Extraction commands, defined in cli_semex so the argparse definitions are
+    # not duplicated between the two entry points.
+    cli_semex.register_subparsers(sub)
 
     # ── enrich-charts ──────────────────────────────────────────────────────
     p_ec = sub.add_parser("enrich-charts",
@@ -512,6 +538,26 @@ def main() -> None:
         "preview":            cmd_preview,
         "restore-react":      cmd_restore_react,
     }
+
+    if args.command is None:
+        parser.print_help()
+        sys.exit(0)
+
+    # Extraction commands follow a different contract: they return a result dict
+    # which the caller prints as JSON and turns into an exit code, whereas the
+    # generation commands above print through _emit and return None.
+    if args.command in cli_semex.COMMANDS:
+        cli_semex.setup_logging(level=getattr(args, "log_level", "INFO"))
+        try:
+            result = cli_semex.COMMANDS[args.command](args)
+        except Exception as e:
+            result = {
+                "status": "error",
+                "command": args.command,
+                "failure": cli_semex.fail_step(args.command, e),
+            }
+        print(json.dumps(result, indent=2, default=str))
+        sys.exit(0 if result.get("status") == "ok" else 1)
 
     if args.command not in dispatch:
         parser.print_help()

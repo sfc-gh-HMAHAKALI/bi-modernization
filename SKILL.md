@@ -266,57 +266,29 @@ at /tmp/bim_agent/<name>_deploy.sql. Please help me deploy and test this agent."
 
 ## Step 8: Generate Streamlit App (if selected)
 
-Run the Streamlit generator:
-```bash
-cd "$BIM_DIR"
-python3 -m modules.cli generate-streamlit /tmp/bim_enriched.json \
-  [--semantic-view DB.SCHEMA.SEMANTIC_VIEW] \
-  [--embed-agent DB.SCHEMA.AGENT_NAME] \
-  [--visuals /tmp/bim_visuals.json] \
-  -o /tmp/bim_streamlit/
-```
+Build the app directly from the enriched inventory and the source BI file, following the
+Enterprise Dashboard Standard below. Do NOT run the `generate-streamlit` CLI first — it
+produces usable output only for simple single-datasource workbooks with explicit mark types
+and no custom SQL, which is rare in practice. Complex workbooks (federated datasources,
+custom SQL, calculated fields, crosstab layouts) produce sparse or broken output that always
+fails validation and wastes a round-trip. The standard below IS the generator.
 
-### Step 8a: Quality Gate
+### Deep analysis of the source (do this BEFORE writing any code)
 
-**CRITICAL — before showing the output to the user, validate it.**
-
-Read each generated `.py` file and check for these degeneracies:
-
-1. **Identical SQL queries** — read all the SQL strings (the text inside `_session.sql(""" ... """)` blocks). If >50% of sheets have the exact same SQL query, the field resolution failed.
-2. **Raw XML sheet names** — check if any `st.subheader()` or chart title contains bracket notation (`[...].[...]`), file paths (`.jpg`, `.png`), or Tableau-internal strings like `none:FIELD:nk`.
-3. **All bar charts** — if every single chart is `px.bar` and the enriched inventory shows all marks were "Automatic", the chart type detection failed. The workbook is likely tabular/crosstab.
-4. **No filters** — check if the sidebar section only contains `pass  # No filters detected`. Compare against `inventory["parameters"]` and worksheet-level filters.
-5. **Uses `st.navigation`** — this requires Streamlit >= 1.36. Many environments have older versions.
-6. **Placeholder table names** — SQL targeting `TARGET_DB.PUBLIC.EXTRACT` or `DB.SCHEMA.TABLE` means table resolution failed.
-7. **Plotly compatibility** — check for `cornerradius` in any `marker=dict(...)` call (breaks Plotly <5.19), duplicate keyword arguments in `update_layout()` (e.g., spreading `**PLOTLY_LAYOUT` that has `margin` AND passing `margin=` again), or CSS `-webkit-background-clip: text` (invisible text in Streamlit webview).
-
-**If ANY of these degeneracies are found, do NOT present the generated files to the user. Proceed to Step 8b instead.**
-
-If all checks pass, proceed to show the user the generated pages and offer a preview.
-
-### Step 8b: LLM-Driven App Generation (fallback)
-
-When the automated generator produces low-quality output, build the Streamlit app manually.
-This produces significantly better results for complex workbooks with custom SQL, crosstab
-layouts, calculated fields, or role-based views.
-
-**Step 8b.1: Deep analysis of the enriched inventory**
-
-Read `/tmp/bim_enriched.json` and extract:
+**From the enriched inventory** (`/tmp/bim_enriched.json`):
 - Dashboard names and the worksheets they contain
-- For each worksheet: `fields_by_datasource` (which datasources it uses and which fields)
+- For each worksheet: `fields_by_datasource`, the mark type, and chart type
 - All dimensions, measures/facts, and their names/expressions
 - Parameters and their allowed values
 - The `source_type` (tableau, powerbi, etc.)
 
-**Step 8b.2: Deep analysis of the source BI file**
-
-If the original source file is available (TWB, PBIX, etc.), re-read it directly to extract
+**From the original source file** (TWB, PBIX, etc.) — re-read it directly to extract
 what the parser missed:
 
 For **Tableau (.twb)**:
-- Parse `<worksheet>` elements: extract the `<mark class="...">` for each (Bar, Line, Text, Automatic)
-- Parse `<column>` elements within each datasource: extract `caption`, `datatype`, `role`, and `<calculation formula="...">` for calculated fields
+- Parse `<worksheet>` elements: extract the `<mark class="...">` for each
+- Parse `<column>` elements within each datasource: extract `caption`, `datatype`, `role`,
+  and `<calculation formula="...">` for calculated fields
 - Parse `<relation>` elements: extract the actual custom SQL queries
 - Parse `<dashboard>` zones: match zone worksheet references to worksheet names
 - Parse `<filter>` elements: extract which fields are used as filters and their allowed values
@@ -326,98 +298,233 @@ For **Power BI (.pbix / .pbit)**:
 - Parse report page visuals for chart types and field bindings
 - Extract DAX measures and their expressions
 
-**Step 8b.3: Build the Streamlit app**
+### Build the Streamlit app — Enterprise Dashboard Standard
 
-Generate a **single-file `app.py`** (more robust than multi-file for compatibility):
+These rules are the codified output of building and browser-testing a 13-dashboard reference
+app (FBR Finance). Every rule exists because a specific defect shipped without it, was found
+by automated or visual testing, and took at least one fix round to close. Follow all of them
+on every generation; they are not optional polish.
 
-1. **Data layer**: If the user's Snowflake account has the source tables, generate `session.sql()` queries based on the actual custom SQL from the source file. If not (demo mode), generate a `@st.cache_data` function with synthetic data that matches the schema — realistic column names, data types, value distributions, and calculated fields.
+**File structure**: Generate `app.py` (shell, navigation, theme), `data.py` (all data loading
+and aggregation), `pages_impl.py` (page rendering functions), and `metrics.py` (safe ratio
+arithmetic). Keep `bim_ui/` as a sibling package containing reusable components. This
+separation means a chart, a KPI card, and a grid cell cannot disagree about formatting,
+because they all call the same code.
 
-2. **Navigation**: Use `st.radio()` in the sidebar (works on Streamlit 1.24+). Do NOT use `st.navigation()` or `st.Page()`.
+**1. Data layer**
 
-3. **Layout**: Match the original dashboard structure:
-   - If the source is a **storyboard** (Tableau) → sidebar radio navigation between story points
-   - If it has **role-based views** (same layout filtered differently) → single page template function called per role with different filter values
-   - If it has **distinct dashboards** → separate page functions
+If the user's Snowflake account has the source tables, generate `session.sql()` queries. If
+not (demo mode), generate `@st.cache_data` functions with synthetic data matching the schema.
+Synthetic data MUST be seeded per-team/per-dimension so reruns do not reshuffle numbers
+(which makes cross-filtering look broken).
 
-4. **Tables**: For crosstab/text mark worksheets, render using **HTML tables via `st.markdown(unsafe_allow_html=True)`** with:
-   - Sticky dark-colored header row
-   - Right-aligned currency columns with `$X,XXX` formatting
-   - Alternating row colors
-   - Compact 5-6px padding (Tableau-dense)
-   - Cell-level color badges for categorical fields (e.g., risk categories)
-   - Color-tinted row backgrounds keyed to a category column
+For plan/target columns stored at a different grain than detail rows, carry the value on
+exactly ONE row per group (e.g. the first product row per month), not on every row. A
+`SUM(plan)` over the detail frame must equal the monthly plan, not plan * product_count.
+Validate this with: `df[df.plan > 0].groupby("month_label").size().unique()` must be `[1]`.
 
-5. **Charts**: For chart worksheets, use `plotly.express` or `plotly.graph_objects` with colors extracted from the source BI file.
+**2. Navigation**
 
-6. **KPIs**: Use styled HTML `<div>` cards, not plain `st.metric()`.
+Use two `st.radio()` groups in the sidebar — one for category, one for dashboard — not
+`st.navigation()`/`st.Page()` (requires Streamlit 1.36+ and breaks on older builds). Do NOT
+use separator strings ("---") as radio options; they render as clickable blank entries.
 
-7. **Filters**: Extract parameters and filter fields from the inventory. Render as `st.multiselect`, `st.radio`, or `st.selectbox` in the sidebar.
+**3. Cross-filtering with exclude-self (CRITICAL)**
 
-8. **CSS**: Inject a `<style>` block via `st.markdown()` with:
-   - Corporate header bar (gradient blue: `#11567F` → `#29B5E8`)
-   - Dense table styling (`.dtable` class)
-   - Badge/pill components for categorical values
-   - Scrollable table containers with max-height
+This is the single biggest gap between a static report and a BI tool. Implement it using a
+FilterStore pattern backed by `st.session_state`:
 
-9. **Plotly / Streamlit Compatibility Rules** (MANDATORY — violations break the app):
+- Each chart declares the dimension it EMITS (e.g. "team") and has a stable `key`.
+- When asked for a filtered frame, apply every active filter EXCEPT the requesting chart's
+  own dimension. This is "exclude-self": the Team chart stays fully visible and clickable
+  even while it is filtering KPIs, trends, and grids by the selected team.
+- Without exclude-self, clicking a bar collapses the chart to one bar and strands the user.
+- Wire chart selections via `st.plotly_chart(fig, on_select="rerun", key=...)`. The returned
+  event contains the selected points. Fingerprint each event and only write state when it
+  differs from last time — writing unconditionally creates infinite rerun loops.
+- KPIs and detail grids consume ALL filters (no exclude-self for non-emitting panels).
+- Render active filters as visible chips with per-filter remove buttons and a clear-all.
+- Give the user a Reset All Filters button in the sidebar.
 
-   These rules are based on real failures observed across multiple BI modernization builds.
-   Violating ANY of them produces runtime errors in common Streamlit+Plotly environments.
+**4. URL-shareable filter state**
 
-   a. **No `cornerradius` in Plotly bar markers.** `marker=dict(cornerradius=N)` was added
-      in Plotly ≥ 5.19. Many Streamlit environments ship Plotly 5.9–5.18. NEVER use it.
-      Instead, bars render with square corners (the default).
+Sync page, target parameter mode, and all filter selections to `st.query_params` so a filtered
+view is a shareable link. On load, hydrate the FilterStore from the URL. Use a compat layer
+for `st.query_params` vs `st.experimental_get_query_params` on older builds.
 
-   b. **No duplicate keyword arguments in `update_layout()`.** When spreading a shared
-      layout dict (`**PLOTLY_LAYOUT`) that contains `margin`, do NOT also pass `margin=`
-      as a separate kwarg. Python raises `TypeError: got multiple values for keyword
-      argument 'margin'`. If you need a custom margin for one chart, build a one-off
-      layout dict or call `update_layout` twice.
+**5. Drill-down**
 
-   c. **CSS `background-clip: text` does not work in Streamlit's webview.** Text styled
-      with `-webkit-background-clip: text; -webkit-text-fill-color: transparent` renders
-      as invisible. For gradient-styled headings, use a plain `color:` on the `<h1>` or
-      use an SVG/image instead.
+Support ordered dimension paths (Team -> Rep, Year -> Quarter -> Month). Track the drill path
+in session state. Render a breadcrumb (Home > BC Sales) with clickable segments. Drilling pins
+the parent value as a filter and switches the display grain to the child dimension.
 
-   d. **`st.navigation()` / `st.Page()` requires Streamlit ≥ 1.36.** Use `st.radio()`
-      in the sidebar for page navigation — works on Streamlit 1.24+.
+**6. Tables — use native `st.dataframe`, NEVER hand-rolled HTML**
 
-   e. **Plotly `go.Figure` shared layout pattern.** Define a `PLOTLY_LAYOUT` dict once and
-      spread it, but keep `margin`, `height`, `title` OUT of the shared dict if any chart
-      needs to override them. Recommended shared dict:
-      ```python
-      PLOTLY_LAYOUT = dict(
-          paper_bgcolor="rgba(0,0,0,0)",
-          plot_bgcolor="rgba(0,0,0,0)",
-          font=dict(color=TEXT_WHITE, family="Inter, sans-serif"),
-          margin=dict(t=40, b=30, l=40, r=20),
-      )
-      ```
-      For charts needing different margins (e.g., small KPI bars), build a separate dict
-      or call `fig.update_layout(margin=dict(...))` as a second call AFTER the first.
+The first-generation app used HTML tables (`st.markdown(unsafe_allow_html=True)`) and burned
+three fix rounds on sticky columns, unreachable Total columns, and sort/search. All of those
+are free with `st.dataframe`:
 
-   f. **Always test Plotly features against the OLDEST likely version.** Assume Plotly 5.9+.
-      Avoid: `cornerradius`, `marker.pattern.fgopacity`, `legendgrouptitle`,
-      `minor` axis properties. These are 5.15+ or 5.19+ features.
+- Derive `column_config` automatically from dtypes plus a format registry:
+  `st.column_config.NumberColumn` for measures, `ProgressColumn` for attainment/percent
+  columns, `LineChartColumn` for inline sparkline columns.
+- Pin the label column (team, product) via `column_order` so it stays visible while scrolling.
+- Add a Total row: SUM measures, AVERAGE ratios (summing four teams at 90% is not 360%).
+- List-typed sparkline columns MUST be homogeneous: the Total row must use an empty list `[]`,
+  not an empty string `""`, or PyArrow raises "cannot mix list and non-list, non-null values"
+  and the grid crashes.
+- When building sparkline series from month-name columns, sort by CALENDAR order (Jan, Feb,
+  Mar...), not alphabetical order (Apr, Aug, Dec...). Alphabetical sort puts Feb before Jan
+  and produces a sparkline showing the wrong trend direction. Detect month names and apply
+  calendar ordering; accept an explicit `order` argument for non-obvious sequences like
+  quarters.
+- Add CSV and Excel download buttons below every grid (use `st.download_button`).
 
-   g. **Choropleth maps for geographic data.** When the TWB has `Multipolygon` marks,
-      use `px.choropleth()` with `locationmode="country names"`. Plotly does not support
-      Tableau-style filled polygons natively.
+**7. Charts — Plotly with reference lines, not competing bar series**
 
-   h. **Heatmaps for Square/Circle marks.** When the TWB uses Square or Circle mark class
-      with a color encoding on a measure, render as `go.Heatmap()` with `texttemplate="%{text}"`.
-      Map the Tableau color gradient to a Plotly `colorscale` list.
+- Use `plotly.graph_objects`, not `plotly.express`, for all dashboard charts. GO gives
+  explicit control over traces, reference lines, and label positioning.
+- Render plan/target as a dashed step-line (`shape="hv"`) overlaid on the actual bars, NOT
+  as a second bar series. A second bar series doubles the mark count and makes "am I above
+  plan" a height comparison instead of a glance.
+- Add horizontal reference lines for thresholds (100% attainment line, quota targets).
+- COMPUTE label headroom from the data: set `yaxis.range = [0, max_value * 1.18]` so outside
+  value labels cannot be clipped by the plot edge. Also set `cliponaxis=False` on bar traces
+  as a second line of defence. This was the single most common visual defect.
+- Use semantic colors from the palette (actual, target, good, warn, bad) — never hardcode hex.
+- Color bars by attainment status (green/amber/red) when the chart shows performance vs target.
+- Set `dragmode=False` — dashboard charts should not pan on drag.
+- Set `scrollZoom=False` in the config — scroll zoom on a dashboard hijacks page scrolling.
+- Collapse long tails: more than 8 categories in a bar chart is unreadable. Aggregate the
+  tail into an "Other" bucket, preserving the total. `max_categories=N` means N total bars
+  including Other.
+- For share-of-total, use horizontal ranked bars instead of donuts. Humans compare bar lengths
+  far more accurately than pie angles, and donut outside-labels clip at the chart edge.
 
-**Step 8b.4: Preview**
+**8. KPI cards — styled HTML with sparkline and progress bar**
 
-Save the app to `/tmp/bim_streamlit/app.py` and launch a local preview:
+- Render as styled HTML `<div>` cards with CSS class `bim-kpi`, not plain `st.metric()`.
+- Each card shows: label, value, delta vs target with semantic color (green up, red down),
+  an inline SVG sparkline (9 data points for YTD trend), and an optional progress bar
+  (thin SVG) showing attainment vs target.
+- Support `higher_is_better=False` for metrics where an increase is bad (churn, cost).
+  Getting this wrong produces a green arrow on a worsening number.
+- Layout KPIs in rows of 4 (not 7). Seven equal columns squeezed values until they clipped.
+  Four keeps values readable with the sidebar expanded at 900px viewport width.
+- Labels MUST wrap (`overflow-wrap: break-word`), never truncate with ellipsis. A truncated
+  label ("MTD BOOKI...") cannot be read; a wrapped label ("MTD BOOKINGS" on two lines) can.
+
+**9. Provenance banner**
+
+Every dashboard must show where its data came from: a strip below the header displaying
+query time, row count, source tables, warehouse, and semantic view. In demo mode, it must
+say "SYNTHETIC DATA — not connected to a live source" prominently. An enterprise viewer will
+not act on a number they cannot trace.
+
+**10. Empty and error states**
+
+A filter combination that excludes everything must render "No data matches the current
+filters" with a Clear Filters button — not a blank panel, not a raw traceback. Every chart
+and grid rendering function must guard its input: if the frame is empty, render the empty
+state and return. Use `states.guard(df, on_clear=store.clear)` as the standard opening.
+
+**11. Theme and color system**
+
+- Resolve colors from the source BI file's custom palette (e.g. Tebra's 24-color palette).
+- Filter the palette for usability: reject colors below 3:1 contrast ratio against the
+  background (invisible bars), reject greys and near-black (read as text/axis, not data),
+  enforce perceptual separation between accepted colors (so adjacent categories in a stacked
+  bar are distinguishable), and keep series colors clear of the status colors (a category
+  should never be painted the same red the app uses to mean "missing target").
+- When the brand palette cannot supply enough usable colors, top up from a curated extension
+  palette first, then from muted hue rotation — never neon, never unsaturated.
+- Status colors (good/warn/bad) are NOT drawn from the brand palette. Use tuned pairs:
+  light-background (#1B7F3B, #B45309, #B4232C) and dark-background (#4ADE80, #FBBF24,
+  #F87171). Verify WCAG AA contrast for every foreground/background pair.
+- Emit `.streamlit/config.toml` for base theming (primaryColor, backgroundColor,
+  secondaryBackgroundColor, textColor) so widgets and native dataframes are themed.
+  Use a distinct `secondaryBackgroundColor` tinted from the primary so the sidebar reads
+  as a separate surface — NOT the same color as the page background.
+- Keep injected CSS minimal: only what `config.toml` cannot express (header band, KPI card
+  structure, chips, provenance strip).
+
+**12. Formatting — one code path, everywhere**
+
+Build a format registry seeded from `visuals.json` `number_formats`, with name-based inference
+as fallback. Every surface — KPI card, axis tick, tooltip, grid cell — formats through the
+same registry. This prevents "$4.2M" in the KPI, "4200" on the axis, and "4,200.00" in the
+grid for the same number.
+
+- Date-like field names (CLOSED_MONTH, CLOSE_DATE, Period) must be detected and treated as
+  text labels, not formatted as counts. The regex `(date|month|quarter|year|period|timestamp)`
+  should guard before numeric inference.
+- `$0` not `$0.0` for zero values in compact currency.
+- Division that can hit zero (attainment, ACV, average deal) must use safe arithmetic that
+  returns 0.0 rather than NaN, inf, or ZeroDivisionError. Centralise this in a `safe_ratio()`
+  function. Do NOT use `df[col].replace(0, pd.NA).fillna(0.0)` — it triggers a pandas
+  FutureWarning about object-dtype downcast that will become an error.
+
+**13. Version tolerance (CRITICAL for local preview)**
+
+The app targets the SiS container runtime (Streamlit 1.50+), but gets previewed locally in
+whatever the developer has. A hard `AttributeError: module 'streamlit' has no attribute
+'fragment'` at import time is the worst possible outcome. Build a compat layer:
+
+- `st.fragment` -> `st.experimental_fragment` -> passthrough (no-op decorator). Losing
+  fragments costs performance, never correctness.
+- `st.query_params` -> `st.experimental_get_query_params`. Losing this disables URL state.
+- `st.plotly_chart(on_select=...)` -> drop `on_select` kwarg. Losing this disables cross-
+  filtering; the chart still renders.
+- `st.dataframe(on_select=...)` -> same pattern.
+- Material icon shortcodes (`:material/info:`) in `st.info(icon=...)` crash on pre-1.31
+  builds. Drop the `icon` kwarg on those versions. Wrap ALL alert calls (info, warning,
+  error) through the compat layer so the degradation notice itself cannot be the thing
+  that crashes the app.
+- `st.columns(gap=...)` -> drop `gap` kwarg on older builds.
+- `st.rerun()` -> `st.experimental_rerun()` on pre-1.27 builds.
+- Show a compatibility notice in the sidebar listing what is unavailable, but ONLY when
+  features are actually missing — silent on the target runtime.
+
+**14. Plotly compatibility floor (Plotly 5.9+)**
+
+These rules prevent runtime errors in older Streamlit+Plotly environments:
+
+- No `cornerradius` in bar markers (added in 5.19).
+- No `legendgrouptitle`, `marker.pattern.fgopacity`, `minor` axis properties (5.15+).
+- No duplicate keyword arguments in `update_layout()`. Use a `_base_layout()` function that
+  accepts `**overrides` and merges them, so the collision cannot be expressed. Never
+  `fig.update_layout(**BASE, showlegend=False)` when BASE already has `showlegend`.
+- CSS `background-clip: text` renders as invisible text in Streamlit's webview. Never use it.
+- For geographic data (Multipolygon marks), use `px.choropleth()`.
+- For Square/Circle marks with color encoding, use `go.Heatmap()`.
+
+**15. `st.fragment` for panel-scoped reruns**
+
+Wrap each independent panel (the monthly chart, the breakdown charts, the detail grid) in
+`@st.fragment` so interacting with one (clicking a bar, selecting a grid row) reruns only
+that panel, not all dashboards. Global filters that affect every chart belong outside
+fragments and trigger full reruns.
+
+### Preview
+
+Save the app files to `/tmp/bim_streamlit/` and launch a local preview:
 
 ```bash
-cd /tmp/bim_streamlit && streamlit run app.py --server.port 8501 --server.headless true
+cd /tmp/bim_streamlit && python3 -m streamlit run app.py --server.port 8501 --server.headless true
 ```
 
-Open the browser and take a screenshot to verify. If issues are found, fix them before
-presenting to the user.
+Use `python3 -m streamlit` rather than bare `streamlit` — the PATH may resolve to an older
+build (e.g. miniconda's Streamlit 1.27 while pip installed 1.63).
+
+Open the browser and verify:
+1. All dashboards render without tracebacks (visit every page in every category)
+2. KPI values are real numbers (not NaN, not blank, not "$0.0")
+3. Grids render with sparklines and progress bars (no Arrow serialization crash)
+4. Cross-filtering works: click a bar, chips appear, other charts update, the clicked chart
+   stays fully visible (exclude-self)
+5. The compat notice appears if on an older Streamlit, or is absent on 1.50+
+6. Toggle the parameter switch — labels and chart titles update consistently
+
+If issues are found, fix them before presenting to the user.
 
 **ALWAYS offer a local preview before deployment.**
 
@@ -440,29 +547,38 @@ Read `/tmp/bim_visuals.json` and the generated app code, then present:
 
 ```
 Visual Fidelity Report
-══════════════════════
 
-✅ Extracted from source (pixel-accurate):
-   - Color scheme: [list each field→color mapping with hex codes]
-   - Background color: #f5f5f5
+Extracted from source (faithful):
+   - Color scheme: [list each field->color mapping with hex codes]
+   - Background color and sidebar tint
    - Parameters: [list each with values]
-   - Column aliases: [count] resolved (list top 5)
-   - Number formats: [list if any]
-   - Dashboard layout proportions: [zone height ratios]
-   - Filter configurations: [count] per worksheet
+   - Column aliases: [count] resolved
+   - Number formats: [count] applied via format registry
+   - Dashboard layout proportions
+   - Filter configurations
 
-⚠️ Approximated (close but not exact):
+Interactive features (enterprise standard):
+   - Cross-filtering: click a chart bar to filter the page (with exclude-self)
+   - URL-shareable filter state (page, parameter mode, filter selections)
+   - Drill-down: [list drill paths, e.g. Team -> Rep]
+   - Native grids with sort, search, pin, progress bars, inline sparklines, export
+   - Plan/target as reference lines (not competing bar series)
+   - 100% attainment reference line on performance charts
+   - Data provenance banner (source tables, warehouse, freshness, row count)
+   - Empty states with Clear Filters button
+   - Version tolerance: runs on Streamlit 1.27+ through 1.63+
+
+Approximated (close but not exact):
    - Chart type: [note if inferred via heuristic vs. explicit mark]
    - Font family: [note if not specified in source]
-   - Header bar styling (Snowflake brand gradient — not in original)
    - Column ordering (may differ from original worksheet row/col encoding)
+   - KPI layout in rows of 4 (Tableau may have used different grouping)
 
-❌ Cannot reproduce in Streamlit:
-   - Tableau storyboard tab animation
-   - Tooltip rich formatting on hover
-   - Action filter cross-highlighting between worksheets
+Cannot reproduce in Streamlit:
+   - Tooltip rich formatting on hover (Plotly tooltips are simpler)
    - Tableau Server/Cloud auth integration
    - Dynamic LOD expressions (if any were flagged as manual)
+   - Tableau storyboard tab animation
 ```
 
 Ask the user: "Does this look acceptable? Any colors or layouts to adjust before deployment?"
