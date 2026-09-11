@@ -729,7 +729,7 @@ synthesize a reference image from your own implementation.
 
 **Deploy prerequisites — check these before promising a deployment:**
 
-- SPCS must be available in the customer's cloud and region. Confirm it before designing
+- SPCS must be available in the user's cloud and region. Confirm it before designing
   around the container runtime.
 - `SYSTEM_COMPUTE_POOL_CPU` exists by default and permits Streamlit workloads, so a simple
   deployment needs no new compute pool.

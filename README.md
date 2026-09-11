@@ -80,7 +80,7 @@ how many fields never reach a dashboard.
 
 Generated apps default to **Altair**, because it is a hard Streamlit dependency and therefore
 already present in Streamlit in Snowflake. Plotly requires an External Access Integration the
-customer has to request and approve.
+user has to request and approve.
 
 Plotly is still used automatically for choropleth, treemap, sunburst, sankey, gauge, and
 scatter above ~5k marks. Override per app with `charts.set_engine("plotly")` or
