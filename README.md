@@ -21,48 +21,81 @@ pip install -r requirements.txt
 ## Layout
 
 ```
+SKILL.md                         router: intent table and the fast path
+extract/  semantic-views/         one sub-skill per build path
+agent/    streamlit-app/  react-app/
 modules/
   tableau/  powerbi/  looker/  denodo/  businessobjects/   source parsers
   output/                        inventory, semantic YAML, reports, si_agent
   adapters/  common/             shared plumbing
-  cli.py                         single entry point for all 17 commands
+  cli.py                         single entry point for all 20 commands
   cli_semex.py                   extraction command implementations
+  portfolio.py                   multi-source parsing with resumable state
+  views.py                       semantic view grouping from observed usage
   chart_extractor.py  streamlit_generator.py  react_generator.py
   agent_builder.py    visual_extractor.py     preview.py
 assets/bim_ui/                   component kit copied into generated apps
 references/                      extraction + migration guidance
 scripts/visual_compare.py        visual QA diffing
-tests/run_all.py                 render gate and component suites
+tests/run_all.py                 render gate, component and structure suites
 ```
 
 ## CLI
 
 `python3 -m modules.cli --help` lists everything. Two halves:
 
-**Extraction** — `crawl`, `parse`, `classify`, `generate-yaml`, `report`, `compare`, `generate-from-workbook`, `seed-data`, `si-agent`, `test-connection`
+**Extraction** — `crawl`, `parse`, `merge`, `propose-views`, `classify`, `generate-yaml`, `report`, `compare`, `generate-from-workbook`, `seed-data`, `si-agent`, `test-connection`
 
-**Generation** — `enrich-charts`, `extract-visuals`, `generate-streamlit`, `generate-react`, `build-agent`, `preview`, `restore-react`
+**Generation** — `migrate`, `enrich-charts`, `extract-visuals`, `generate-streamlit`, `generate-react`, `build-agent`, `preview`, `restore-react`
 
-### Typical run
+### Fast path
+
+One command for the whole deterministic chain, stopping before app generation:
+
+```bash
+python3 -m modules.cli migrate "/path/to/dashboards" --type tableau -o /tmp/out \
+  [--database MY_DB --schema PUBLIC]
+```
+
+Runs crawl → parse → merge → enrich → extract-visuals → propose-views → generate-yaml.
+Accepts a file, a directory, or a glob. Resumable: re-running skips completed steps,
+`--force` redoes everything. On a 24-workbook folder this takes about two seconds.
+
+### Step by step
 
 ```bash
 # 1. Find the sources
 python3 -m modules.cli crawl /path/to/dashboards --type tableau
 
-# 2. Parse to an inventory
-python3 -m modules.cli parse "/path/to/wb.twb" --type tableau -o /tmp/inv.json
+# 2. Parse — a file, a directory, or a glob. A directory also writes one inventory
+#    per source and a checkpoint, so an interrupted run resumes.
+python3 -m modules.cli parse "/path/to/dashboards" --type tableau -o /tmp/inv.json
 
-# 3. Semantic view YAML
-python3 -m modules.cli generate-yaml /tmp/inv.json -o /tmp/yaml/
+# 3. Combine inventories from different source types (de-duplicates columns)
+python3 -m modules.cli merge /tmp/inv_a.json /tmp/inv_b.json -o /tmp/inv.json
 
-# 4. Chart types and visual metadata
-python3 -m modules.cli enrich-charts /tmp/inv.json --source-files "/path/to/wb.twb" -o /tmp/enr.json
+# 4. Decide the semantic view count from observed dashboard usage, then generate
+python3 -m modules.cli propose-views /tmp/inv.json -o /tmp/views.json
+python3 -m modules.cli generate-yaml /tmp/inv.json --groups /tmp/views.json -o /tmp/yaml/
+
+# 5. Chart types and visual metadata
+python3 -m modules.cli enrich-charts /tmp/inv.json --source-files "/path/to/*.twb" -o /tmp/enr.json
 python3 -m modules.cli extract-visuals "/path/to/wb.twb" -o /tmp/visuals.json
 
-# 5. Build
+# 6. Build
 python3 -m modules.cli generate-streamlit /tmp/enr.json --visuals /tmp/visuals.json -o /tmp/app/
 python3 -m modules.cli build-agent /tmp/enr.json --database MY_DB --schema PUBLIC -o /tmp/agent/
 ```
+
+### Semantic view grouping
+
+`propose-views` answers "how many views, and which tables in each" from evidence rather
+than a rule: tables that appear together on a dashboard get joined together in real
+queries, so they belong in one view. It reports the driving dashboards, contributing
+workbooks and column counts behind each group, flags tables no dashboard touches, and falls
+back to one view per table when there is no usage evidence — saying so, rather than
+presenting a guess as a recommendation.
+
 
 ### Migration report (Tableau)
 
@@ -100,12 +133,14 @@ labels do not collide.
 
 ## Workflow (via SKILL.md)
 
-1. Detect and crawl sources; route by source tier
-2. Parse to an inventory
-3. Enrich with chart types and visual metadata
-4. Preview dashboards, domains, proposed agent structure
-5. User selects what to build
-6. Translate calculations and reconcile numbers **before** building UI
+`SKILL.md` is a thin router; each build path is its own sub-skill, loaded only when needed.
+
+1. `extract/` — detect and crawl sources, parse, surface the findings that change scope
+2. Router asks what to build
+3. `semantic-views/` — propose the grouping, generate YAML, deploy
+4. `agent/` — build the Cortex Agent
+5. `streamlit-app/` — translate calculations and reconcile numbers **before** building UI
+6. `react-app/` — Next.js + ECharts on SPCS
 7. `build-agent` → invoke `agent-studio`
 8. `generate-streamlit` → invoke `developing-with-streamlit-in-snowflake`
 9. `generate-react` → invoke `snowflake-apps` + `sar-actions-desktop`

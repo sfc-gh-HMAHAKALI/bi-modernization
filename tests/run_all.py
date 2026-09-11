@@ -15,6 +15,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SUITES = [
+    "test_skill_structure.py",
     "test_filters.py",
     "test_components.py",
     "test_portfolio.py",
