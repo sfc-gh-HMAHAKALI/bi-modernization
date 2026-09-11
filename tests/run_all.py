@@ -19,6 +19,7 @@ SUITES = [
     "test_components.py",
     "test_portfolio.py",
     "test_merge.py",
+    "test_views.py",
     "test_inspector_contract.py",
     "test_chart_engines.py",
     "test_pages.py",

@@ -374,6 +374,46 @@ def cmd_merge(args: argparse.Namespace) -> dict:
     return result
 
 
+def cmd_propose_views(args: argparse.Namespace) -> dict:
+    """Propose semantic-view groupings from observed dashboard usage."""
+    log.info("PROPOSE-VIEWS: input=%s, strategy=%s", args.input, args.strategy)
+    start = time.time()
+
+    from modules.output.inventory import load_inventory
+    from modules.views import format_proposal, propose
+
+    inventory = load_inventory(args.input)
+    proposal = propose(inventory, strategy=args.strategy)
+
+    # Human-readable to stderr so stdout stays machine-parseable JSON.
+    print(format_proposal(proposal), file=sys.stderr)
+
+    output_path = None
+    if args.output:
+        os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump(proposal, f, indent=2, default=str)
+        output_path = args.output
+
+    return {
+        "status": "ok",
+        "command": "propose-views",
+        "strategy": proposal["strategy"],
+        "view_count": proposal["view_count"],
+        "views": [
+            {"name": v["name"], "tables": v["tables"],
+             "column_total": v["evidence"]["column_total"],
+             "dashboard_count": v["evidence"]["dashboard_count"],
+             "workbook_count": v["evidence"]["workbook_count"]}
+            for v in proposal["views"]
+        ],
+        "notes": proposal["notes"],
+        "unreached_tables": proposal["unreached_tables"],
+        "output_path": output_path,
+        "elapsed_seconds": round(time.time() - start, 2),
+    }
+
+
 def cmd_classify(args: argparse.Namespace) -> dict:
     """Run complexity classification on an existing inventory."""
     log.info("CLASSIFY: input=%s", args.input)
@@ -438,10 +478,20 @@ def cmd_generate(args: argparse.Namespace) -> dict:
     output_dir = _resolve_output_dir(args, command="generate")
     inventory = load_inventory(args.input)
 
+    # An explicit grouping from propose-views overrides the column-count split:
+    # grouping by observed BI usage beats grouping by an arbitrary threshold.
+    groups = None
+    if getattr(args, "groups", None):
+        with open(args.groups, encoding="utf-8") as f:
+            payload = json.load(f)
+        groups = payload.get("views", payload) if isinstance(payload, dict) else payload
+        log.info("using %d explicit view group(s) from %s", len(groups or []), args.groups)
+
     paths = generate_all_yamls(
         inventory,
         output_dir=output_dir,
         split_threshold=args.split_threshold,
+        groups=groups,
     )
 
     # Move yaml files into subfolder if multiple
@@ -1374,6 +1424,15 @@ def register_subparsers(subparsers) -> None:
     p_classify.add_argument("input", help="Inventory JSON file.")
     p_classify.add_argument("--output", "-o", help="Save updated inventory to this path.")
 
+    # --- propose-views ---
+    p_pv = subparsers.add_parser("propose-views",
+                                 help="Propose semantic-view groupings from dashboard usage.")
+    p_pv.add_argument("input", help="Inventory JSON file.")
+    p_pv.add_argument("--output", "-o", help="Save the proposal JSON to this path.")
+    p_pv.add_argument("--strategy", default="auto",
+                      choices=["auto", "co-usage", "one-per-table"],
+                      help="auto uses co-usage when the dashboards support it, else 1:1.")
+
     # --- merge ---
     p_merge = subparsers.add_parser("merge",
                                     help="Merge several inventories into one, de-duplicating columns.")
@@ -1391,6 +1450,8 @@ def register_subparsers(subparsers) -> None:
     p_generate.add_argument("--customer", help="Customer name for auto-naming output folder.")
     p_generate.add_argument("--split-threshold", type=int, default=100,
                             help="Max columns per view before splitting.")
+    p_generate.add_argument("--groups",
+                            help="views.json from propose-views. Overrides --split-threshold.")
 
     # --- test-connection ---
     p_test = subparsers.add_parser("test-connection", help="Test source connectivity.")
@@ -1497,6 +1558,7 @@ COMMANDS = {
     "parse": cmd_parse,
     "classify": cmd_classify,
     "merge": cmd_merge,
+    "propose-views": cmd_propose_views,
     "generate-yaml": cmd_generate,
     "test-connection": cmd_test_connection,
     "report": cmd_report,

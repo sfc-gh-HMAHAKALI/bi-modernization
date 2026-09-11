@@ -274,6 +274,7 @@ def generate_all_yamls(
     output_dir: str,
     split_threshold: int = MAX_COLUMNS_PER_VIEW,
     verified_queries: list[dict] | None = None,
+    groups: list[dict] | None = None,
 ) -> list[str]:
     """Generate YAML files, splitting if inventory exceeds threshold.
 
@@ -281,12 +282,19 @@ def generate_all_yamls(
         inventory: Unified inventory.
         output_dir: Directory to write YAML files.
         split_threshold: Max columns per view before splitting.
+        groups: Explicit view groupings from `propose-views`, each
+            {"name": str, "tables": [str]}. When given, these decide the split
+            instead of the column-count threshold -- grouping by observed BI
+            usage beats grouping by an arbitrary column count.
 
     Returns:
         List of written file paths.
     """
     log.info("Generating YAML files to %s", output_dir)
     os.makedirs(output_dir, exist_ok=True)
+
+    if groups:
+        return _generate_grouped_yamls(inventory, output_dir, groups, verified_queries)
 
     total = (
         len(inventory.get("dimensions", []))
@@ -427,6 +435,69 @@ def _map_join_type(join_type: str) -> str:
     if "full" in jt:
         return "full_outer"
     return "left_outer"
+
+
+def _generate_grouped_yamls(
+    inventory: dict,
+    output_dir: str,
+    groups: list[dict],
+    verified_queries: list[dict] | None = None,
+) -> list[str]:
+    """Write one semantic view per proposed group.
+
+    A group may span several tables, which is the point: tables queried together
+    on a dashboard belong in one view. `_filter_inventory_by_table` handles a
+    single table, so filtering here is done over the group's table set.
+    """
+    paths: list[str] = []
+    for group in groups:
+        tables = {str(t).upper() for t in group.get("tables", [])}
+        if not tables:
+            continue
+        sub = _filter_inventory_by_tables(inventory, tables)
+        if not (sub.get("dimensions") or sub.get("facts") or sub.get("metrics")):
+            log.info("Skipping %s: no columns resolve to %s",
+                     group.get("name"), ", ".join(sorted(tables)))
+            continue
+
+        name = str(group.get("name") or f"{sorted(tables)[0]}_SEMANTIC_VIEW")
+        if not name.upper().endswith("_SEMANTIC_VIEW"):
+            name = f"{name}_SEMANTIC_VIEW"
+        name = _sanitize_name(name).upper()
+
+        yaml_str = generate_semantic_view_yaml(
+            sub, view_name=name,
+            verified_queries=[vq for vq in (verified_queries or [])
+                              if tables & {t.upper() for t in vq.get("tables", [])}],
+        )
+        path = os.path.join(output_dir, f"{name}.yaml")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(yaml_str)
+        paths.append(path)
+
+    log.info("Wrote %d grouped YAML file(s).", len(paths))
+    return paths
+
+
+def _filter_inventory_by_tables(inventory: dict, tables: set[str]) -> dict:
+    """Sub-inventory covering a SET of tables, for a multi-table view."""
+    upper = {t.upper() for t in tables}
+
+    def keep(item: dict) -> bool:
+        return str(item.get("table", "")).upper() in upper
+
+    return {
+        **inventory,
+        "tables": [t for t in inventory.get("tables", [])
+                   if str(t.get("name", "")).upper() in upper],
+        "relationships": [r for r in inventory.get("relationships", [])
+                          if str(r.get("left_table", "")).upper() in upper
+                          or str(r.get("right_table", "")).upper() in upper],
+        "dimensions": [d for d in inventory.get("dimensions", []) if keep(d)],
+        "facts": [f for f in inventory.get("facts", []) if keep(f)],
+        "metrics": [m for m in inventory.get("metrics", []) if keep(m)],
+        "filters": [f for f in inventory.get("filters", []) if keep(f)],
+    }
 
 
 def _filter_inventory_by_table(inventory: dict, table_name: str) -> dict:

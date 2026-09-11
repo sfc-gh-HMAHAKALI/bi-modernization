@@ -207,21 +207,25 @@ def _dashboards(inv: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _worksheet_names(dash: dict[str, Any]) -> list[str]:
-    """Collect worksheet names referenced by a dashboard's zone tree."""
-    found: list[str] = []
+    """Collect worksheet names referenced by a dashboard's zone tree.
 
-    def walk(zones: Any) -> None:
-        if isinstance(zones, dict):
-            name = zones.get("worksheet") or zones.get("name")
-            if zones.get("worksheet") and name not in found:
-                found.append(name)
-            walk(zones.get("children"))
-        elif isinstance(zones, list):
-            for z in zones:
-                walk(z)
+    A worksheet zone is a leaf zone with a name; container zones carry layout
+    only. This delegates to the inspector's own resolver rather than
+    re-implementing the rule, because an earlier hand-rolled version looked for a
+    "worksheet" key that zones do not have. It silently returned nothing, which
+    emptied every dashboard's sheet list and left dashboard_name and page_name
+    blank on all 349 columns -- destroying exactly the usage evidence that
+    semantic-view grouping depends on.
+    """
+    from .inspector import _referenced_worksheets
 
-    walk(dash.get("zones", []))
-    return found
+    zones = dash.get("zones") or []
+    try:
+        return sorted(_referenced_worksheets(zones))
+    except (KeyError, TypeError) as exc:
+        log.warning("could not read zones for dashboard %r (%s)",
+                    dash.get("name", ""), exc)
+        return []
 
 
 def to_parsed(inv: dict[str, Any]) -> dict[str, Any]:
