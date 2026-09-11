@@ -313,6 +313,67 @@ def _cmd_parse_portfolio(args: argparse.Namespace, start: float) -> dict:
     return result
 
 
+def cmd_merge(args: argparse.Namespace) -> dict:
+    """Merge several inventories into one, de-duplicating columns."""
+    log.info("MERGE: %d input(s)", len(args.inputs))
+    start = time.time()
+
+    from modules.output.inventory import load_inventory, merge_inventories, save_inventory
+
+    inventories = []
+    failed = []
+    for path in args.inputs:
+        try:
+            inventories.append(load_inventory(path))
+        except Exception as e:
+            # A bad input should not lose the good ones.
+            failed.append({"path": path, "error": f"{type(e).__name__}: {e}"})
+
+    if not inventories:
+        return {
+            "status": "error",
+            "command": "merge",
+            "failure": fail_step("merge", ExtractionError("no readable inventories")),
+            "failed": failed,
+        }
+
+    before = {
+        k: sum(len(i.get(k, [])) for i in inventories)
+        for k in ("tables", "dimensions", "facts", "metrics")
+    }
+    merged = merge_inventories(inventories)
+
+    if args.database or args.schema:
+        sf = merged.setdefault("snowflake_target", {})
+        if args.database:
+            sf["database"] = args.database
+        if args.schema:
+            sf["schema"] = args.schema
+
+    output_path = save_inventory(merged, args.output) if args.output else None
+
+    result = {
+        "status": "ok",
+        "command": "merge",
+        "input_count": len(inventories),
+        "failed": failed,
+        # Both numbers, so the de-duplication is visible rather than implied.
+        "before": before,
+        "after": {k: len(merged.get(k, [])) for k in
+                  ("tables", "dimensions", "facts", "metrics")},
+        "dashboard_count": len(merged.get("dashboards", [])),
+        "source_count": len(merged.get("sources", [])),
+        "complexity_summary": merged.get("complexity_summary", {}),
+        "output_path": output_path,
+        "elapsed_seconds": round(time.time() - start, 2),
+    }
+    if not args.output:
+        result["inventory"] = merged
+
+    log.info("MERGE complete: %s -> %s", before, result["after"])
+    return result
+
+
 def cmd_classify(args: argparse.Namespace) -> dict:
     """Run complexity classification on an existing inventory."""
     log.info("CLASSIFY: input=%s", args.input)
@@ -1313,6 +1374,14 @@ def register_subparsers(subparsers) -> None:
     p_classify.add_argument("input", help="Inventory JSON file.")
     p_classify.add_argument("--output", "-o", help="Save updated inventory to this path.")
 
+    # --- merge ---
+    p_merge = subparsers.add_parser("merge",
+                                    help="Merge several inventories into one, de-duplicating columns.")
+    p_merge.add_argument("inputs", nargs="+", help="Inventory JSON files to merge.")
+    p_merge.add_argument("--output", "-o", help="Save the merged inventory to this path.")
+    p_merge.add_argument("--database", help="Target Snowflake database.")
+    p_merge.add_argument("--schema", help="Target Snowflake schema.")
+
     # --- generate ---
     # Named generate-yaml, not generate, so it is unambiguous alongside the
     # bi-modernization generate-streamlit / generate-react commands.
@@ -1427,6 +1496,7 @@ COMMANDS = {
     "crawl": cmd_crawl,
     "parse": cmd_parse,
     "classify": cmd_classify,
+    "merge": cmd_merge,
     "generate-yaml": cmd_generate,
     "test-connection": cmd_test_connection,
     "report": cmd_report,

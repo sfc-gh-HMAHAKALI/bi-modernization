@@ -101,15 +101,43 @@ def build_unified_inventory(
     return inventory
 
 
+_PROVENANCE_FIELDS = ("dashboard_name", "page_name", "widget_name",
+                      "source_view", "source_file")
+
+
+def _merge_provenance(into: dict, other: dict) -> None:
+    """Union the comma-joined provenance fields of a duplicate item.
+
+    Provenance is what makes a merged inventory auditable: after merging 24
+    workbooks you still need to answer "which dashboards use ACCOUNT_NAME".
+    Kept as comma-joined strings because that is what `_normalize_item` already
+    produces and what downstream readers expect.
+    """
+    for field in _PROVENANCE_FIELDS:
+        existing = str(into.get(field) or "")
+        incoming = str(other.get(field) or "")
+        if not incoming:
+            continue
+        parts = {p.strip() for p in f"{existing},{incoming}".split(",") if p.strip()}
+        into[field] = ", ".join(sorted(parts))
+
+
 def merge_inventories(inventories: list[dict]) -> dict:
     """Merge multiple inventories (e.g., from multiple source files) into one.
 
-    Tables are deduped by name. Dimensions/facts/metrics are appended.
-    Flagged items and errors are merged.
+    Everything is de-duplicated, not appended. Appending was the previous
+    behaviour and it does not survive a real portfolio: 24 finance workbooks over
+    the same tables produced 1,489 dimensions where only 349 are distinct, with
+    ACCOUNT_NAME repeated 15 times. A semantic view generated from that is wrong,
+    and an agent reading it sees fifteen identical columns.
+
+    Columns are keyed on (table, name). Duplicates merge their provenance rather
+    than becoming extra rows, so the dashboards that use a field are still
+    recoverable afterwards.
     """
     log.info("Merging %d inventories.", len(inventories))
 
-    merged = {
+    merged: dict[str, Any] = {
         "source_type": "merged",
         "snowflake_target": inventories[0].get("snowflake_target", {}) if inventories else {},
         "tables": [],
@@ -121,37 +149,135 @@ def merge_inventories(inventories: list[dict]) -> dict:
         "flagged": [],
         "complexity_summary": {"simple": 0, "needs_translation": 0, "manual_required": 0},
         "errors": [],
+        # Usage evidence. Dropping these was a real loss: `propose-views` decides
+        # how many semantic views to create from which tables appear together on
+        # a dashboard, so a merged inventory without dashboards cannot be grouped.
+        "dashboards": [],
+        "worksheets": [],
+        "sources": [],
     }
 
     seen_tables: set[str] = set()
+    seen_rels: set[tuple] = set()
+    seen_filters: set[tuple] = set()
+    # (collection, table, name) -> the item already kept, for provenance merging.
+    columns: dict[tuple[str, str, str], dict] = {}
 
     for inv in inventories:
+        src = inv.get("source_file") or inv.get("source") or ""
+        if src:
+            merged["sources"].append(src)
+
         for table in inv.get("tables", []):
             tname = table.get("name", "")
             if tname and tname not in seen_tables:
                 merged["tables"].append(table)
                 seen_tables.add(tname)
 
-        merged["relationships"].extend(inv.get("relationships", []))
-        merged["dimensions"].extend(inv.get("dimensions", []))
-        merged["facts"].extend(inv.get("facts", []))
-        merged["metrics"].extend(inv.get("metrics", []))
-        merged["filters"].extend(inv.get("filters", []))
+        for rel in inv.get("relationships", []):
+            key = (rel.get("left_table", ""), rel.get("right_table", ""),
+                   rel.get("condition", ""), rel.get("join_type", ""))
+            if key not in seen_rels:
+                seen_rels.add(key)
+                merged["relationships"].append(rel)
+
+        for coll in ("dimensions", "facts", "metrics"):
+            for item in inv.get(coll, []):
+                key = (coll, str(item.get("table", "")), str(item.get("name", "")))
+                kept = columns.get(key)
+                if kept is None:
+                    copy = dict(item)
+                    # Attribute the column to its workbook even when the parser
+                    # did not set source_file itself.
+                    if src and not copy.get("source_file"):
+                        copy["source_file"] = src
+                    columns[key] = copy
+                    merged[coll].append(copy)
+                else:
+                    incoming = dict(item)
+                    if src and not incoming.get("source_file"):
+                        incoming["source_file"] = src
+                    _merge_provenance(kept, incoming)
+
+        for filt in inv.get("filters", []):
+            key = (str(filt.get("table", "")), str(filt.get("name", "")),
+                   str(filt.get("expr", "")))
+            if key not in seen_filters:
+                seen_filters.add(key)
+                merged["filters"].append(filt)
+
         merged["flagged"].extend(inv.get("flagged", []))
         merged["errors"].extend(inv.get("errors", []))
+
+        # Dashboards and worksheets are per-workbook by nature, so they are
+        # concatenated rather than de-duplicated, but tagged so a name collision
+        # across two workbooks stays distinguishable.
+        for dash in inv.get("dashboards", []):
+            merged["dashboards"].append({**dash, "source_file": dash.get("source_file") or src})
+        for ws in inv.get("worksheets", []):
+            merged["worksheets"].append({**ws, "source_file": ws.get("source_file") or src})
+
+        _merge_inspection(merged, inv, src)
 
         for k in ("simple", "needs_translation", "manual_required"):
             merged["complexity_summary"][k] += inv.get("complexity_summary", {}).get(k, 0)
 
+    # Recount complexity from the de-duplicated columns; summing per-source
+    # counts would otherwise report the pre-dedup totals and disagree with the
+    # inventory it describes.
+    recount = {"simple": 0, "needs_translation": 0, "manual_required": 0}
+    for coll in ("dimensions", "facts", "metrics"):
+        for item in merged[coll]:
+            c = item.get("complexity", "simple")
+            if c in recount:
+                recount[c] += 1
+    merged["complexity_summary"] = recount
+
     log.info(
-        "Merged result: %d tables, %d dimensions, %d facts, %d metrics.",
-        len(merged["tables"]),
-        len(merged["dimensions"]),
-        len(merged["facts"]),
-        len(merged["metrics"]),
+        "Merged result: %d tables, %d dimensions, %d facts, %d metrics "
+        "(from %d inventories).",
+        len(merged["tables"]), len(merged["dimensions"]),
+        len(merged["facts"]), len(merged["metrics"]), len(inventories),
     )
 
     return merged
+
+
+def _merge_inspection(merged: dict, inv: dict, src: str) -> None:
+    """Combine per-source Tableau inspection payloads.
+
+    Translation prescriptions are de-duplicated by (datasource, field) so a
+    calculation shared across workbooks is not translated twice; the rest is
+    keyed by source file, since layout and visual styles are per-workbook.
+    """
+    insp = inv.get("tableau_inspection")
+    if not insp:
+        return
+
+    target = merged.setdefault("tableau_inspection", {
+        "translation": [], "warnings": [], "by_source": {},
+    })
+
+    seen = {(t.get("datasource", ""), t.get("field", ""))
+            for t in target["translation"]}
+    for t in insp.get("translation", []):
+        key = (t.get("datasource", ""), t.get("field", ""))
+        if key not in seen:
+            seen.add(key)
+            target["translation"].append({**t, "source_file": src})
+
+    for w in insp.get("warnings", []):
+        entry = f"{src}: {w}" if src else w
+        if entry not in target["warnings"]:
+            target["warnings"].append(entry)
+
+    if src:
+        target["by_source"][src] = {
+            k: v for k, v in insp.items()
+            if k in ("visual_styles", "layout", "filters", "worksheet_marks",
+                     "field_usage", "groups_and_bins")
+        }
+
 
 
 def save_inventory(inventory: dict, output_path: str) -> str:
