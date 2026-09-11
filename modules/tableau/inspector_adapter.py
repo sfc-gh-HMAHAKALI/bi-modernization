@@ -22,6 +22,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..common.errors import ExtractionError
 from ..common.logger import get_logger
 from . import inspector
 
@@ -318,6 +319,18 @@ def parse_workbook(path: str) -> dict[str, Any]:
                     path, type(exc).__name__, exc)
         from .parser import parse_workbook as legacy
         parsed = legacy(path)
+
+        # The legacy parser reports failures in `errors` rather than raising, so
+        # if it also found nothing this file is simply unreadable. Returning the
+        # empty shell here would report a successful parse of a file neither
+        # parser could read -- and in a portfolio run that becomes a workbook
+        # silently contributing nothing to the merged inventory.
+        if not parsed.get("datasources"):
+            raise ExtractionError(
+                f"neither the inspector nor the legacy parser could read {path}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
         parsed["inspection"] = {}
         parsed.setdefault("errors", []).append({
             "step": "inspector",

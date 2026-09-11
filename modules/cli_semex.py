@@ -143,6 +143,12 @@ def cmd_parse(args: argparse.Namespace) -> dict:
             )),
         }
 
+    # A directory or glob means a portfolio run: parse every source, checkpoint
+    # as we go, and merge. Routed before the single-file path so the single-file
+    # result contract below stays byte-for-byte what it always was.
+    if not os.path.isfile(path):
+        return _cmd_parse_portfolio(args, start)
+
     try:
         parsed = _run_parser(path, source_type)
     except Exception as e:
@@ -195,6 +201,115 @@ def cmd_parse(args: argparse.Namespace) -> dict:
         result["inventory"] = inventory
 
     log.info("PARSE complete in %.2fs", result["elapsed_seconds"])
+    return result
+
+
+def _cmd_parse_portfolio(args: argparse.Namespace, start: float) -> dict:
+    """Parse a directory or glob of sources into per-source and merged inventories.
+
+    Separate from cmd_parse's single-file path so that path's result contract is
+    untouched -- callers and tests depend on its exact keys.
+    """
+    from modules.output.inventory import build_unified_inventory, merge_inventories, save_inventory
+    from modules.portfolio import parse_portfolio, resolve_sources
+
+    source_type = args.type
+    path = args.path
+
+    try:
+        paths, notes = resolve_sources(
+            path, source_type,
+            recurse=not getattr(args, "no_recurse", False),
+            max_files=getattr(args, "max_files", None) or 500,
+        )
+    except Exception as e:
+        return {"status": "error", "command": "parse", "failure": fail_step("parse", e)}
+
+    if not paths:
+        return {
+            "status": "error",
+            "command": "parse",
+            "failure": fail_step("parse", ExtractionError(
+                f"no {source_type} sources found at {path}"
+            )),
+            "notes": notes,
+        }
+
+    sf_target = {}
+    if args.database:
+        sf_target["database"] = args.database
+    if args.schema:
+        sf_target["schema"] = args.schema
+
+    # Artifacts live beside the requested output so a portfolio run leaves an
+    # auditable trail: one inventory per workbook plus the checkpoint.
+    if args.output:
+        base = os.path.dirname(os.path.abspath(args.output)) or "."
+        stem = Path(args.output).stem
+        inventory_dir = os.path.join(base, f"{stem}_sources")
+        state_path = os.path.join(base, f"{stem}_state.json")
+    else:
+        inventory_dir = None
+        state_path = None
+
+    run = parse_portfolio(
+        paths, source_type,
+        parse_one=_run_parser,
+        build_inventory=build_unified_inventory,
+        sf_target=sf_target or None,
+        inventory_dir=inventory_dir,
+        state_path=state_path,
+        resume=not getattr(args, "no_resume", False),
+    )
+
+    if not run["inventories"]:
+        return {
+            "status": "error",
+            "command": "parse",
+            "failure": fail_step("parse", ExtractionError(
+                f"all {len(paths)} source(s) failed to parse"
+            )),
+            "sources": run["sources"],
+            "notes": notes,
+        }
+
+    merged = merge_inventories(run["inventories"])
+    if sf_target:
+        merged["snowflake_target"] = {**merged.get("snowflake_target", {}), **sf_target}
+
+    output_path = save_inventory(merged, args.output) if args.output else None
+
+    result = {
+        # "ok" even with some failures, because the run produced a usable
+        # inventory; failed_count and sources carry the detail. A caller wanting
+        # all-or-nothing can check failed_count.
+        "status": "ok",
+        "command": "parse",
+        "mode": "portfolio",
+        "source_type": source_type,
+        "source_count": len(paths),
+        "parsed_count": run["ok_count"],
+        "failed_count": run["failed_count"],
+        "failed": run["failed"],
+        "table_count": len(merged.get("tables", [])),
+        "dimension_count": len(merged.get("dimensions", [])),
+        "fact_count": len(merged.get("facts", [])),
+        "metric_count": len(merged.get("metrics", [])),
+        "flagged_count": len(merged.get("flagged", [])),
+        "complexity_summary": merged.get("complexity_summary", {}),
+        "sources": run["sources"],
+        "inventory_dir": inventory_dir,
+        "state_path": run["state_path"],
+        "output_path": output_path,
+        "notes": notes,
+        "elapsed_seconds": round(time.time() - start, 2),
+    }
+
+    if not args.output:
+        result["inventory"] = merged
+
+    log.info("PARSE portfolio complete: %d/%d sources in %.2fs",
+             run["ok_count"], len(paths), result["elapsed_seconds"])
     return result
 
 
@@ -1175,7 +1290,8 @@ def register_subparsers(subparsers) -> None:
     # --- parse ---
     p_parse = subparsers.add_parser("parse", help="Parse source files into inventory.")
     p_parse.add_argument("path", nargs="?", default="",
-                         help="File or directory to parse (required for --mode file).")
+                         help="File, directory, or glob to parse. A directory or glob "
+                              "parses every source found and also writes a merged inventory.")
     p_parse.add_argument("--type", required=True,
                          choices=["tableau", "looker", "powerbi", "denodo", "businessobjects"])
     p_parse.add_argument("--mode", choices=["file", "server"], default="file",
@@ -1185,6 +1301,12 @@ def register_subparsers(subparsers) -> None:
     p_parse.add_argument("--output", "-o", help="Save inventory JSON to this path.")
     p_parse.add_argument("--database", help="Target Snowflake database.")
     p_parse.add_argument("--schema", help="Target Snowflake schema.")
+    p_parse.add_argument("--max-files", type=int, default=500,
+                         help="Cap on sources parsed from a directory or glob (default: 500).")
+    p_parse.add_argument("--no-recurse", action="store_true",
+                         help="Do not descend into subdirectories.")
+    p_parse.add_argument("--no-resume", action="store_true",
+                         help="Ignore any checkpoint and reparse every source.")
 
     # --- classify ---
     p_classify = subparsers.add_parser("classify", help="Classify inventory complexity.")

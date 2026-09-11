@@ -17,6 +17,7 @@ HERE = Path(__file__).resolve().parent
 SUITES = [
     "test_filters.py",
     "test_components.py",
+    "test_portfolio.py",
     "test_inspector_contract.py",
     "test_chart_engines.py",
     "test_pages.py",
