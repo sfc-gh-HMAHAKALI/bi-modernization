@@ -418,6 +418,231 @@ def cmd_extract_visuals(args: argparse.Namespace) -> None:
 # Command: restore-react (undo mock injection after preview)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Command: migrate — the whole deterministic chain
+# ---------------------------------------------------------------------------
+
+def cmd_migrate(args: argparse.Namespace) -> None:
+    """Run crawl -> parse -> merge -> enrich -> visuals -> propose -> yaml.
+
+    Stops before app generation on purpose. Everything up to here is mechanical
+    and safe to run unattended; deciding which dashboards to rebuild, and
+    reconciling the numbers, is not. Individual commands remain available for
+    anyone who wants to drive the steps by hand.
+
+    Resumable: a step whose artifact already exists is skipped unless --force,
+    so re-running after a failure continues rather than starting over.
+    """
+    import json as _json
+    import time as _time
+    from pathlib import Path as _Path
+
+    t0 = time.perf_counter()
+
+    out = _Path(args.output or _auto_output_dir("migrate"))
+    out.mkdir(parents=True, exist_ok=True)
+
+    inv_path = out / "inventory.json"
+    enr_path = out / "enriched.json"
+    vis_dir = out / "visuals"
+    views_path = out / "views.json"
+    yaml_dir = out / "semantic_views"
+    state_path = out / "migrate_state.json"
+
+    state: dict = {}
+    if state_path.is_file() and not args.force:
+        try:
+            state = _json.loads(state_path.read_text())
+        except (OSError, ValueError):
+            state = {}
+    steps: dict = state.get("steps", {})
+
+    def record(name: str, **info) -> None:
+        steps[name] = {"at": _time.strftime("%Y-%m-%dT%H:%M:%S"), **info}
+        state.update({"output_dir": str(out), "source": args.input,
+                      "source_type": args.type, "steps": steps})
+        try:
+            state_path.write_text(_json.dumps(state, indent=2, default=str))
+        except OSError:
+            pass
+
+    def done(name: str, artifact: _Path) -> bool:
+        return (not args.force) and name in steps and artifact.exists()
+
+    total = 6
+    step_log: list[str] = []
+
+    def say(n: int, msg: str) -> None:
+        line = f"[{n}/{total}] {msg}"
+        step_log.append(line)
+        print(line, file=sys.stderr)
+
+    try:
+        # ── 1-3. resolve + parse (+ merge, for a portfolio) ────────────────
+        if done("parse", inv_path):
+            inventory = _json.loads(inv_path.read_text())
+            say(1, f"parse       skipped, {inv_path.name} exists")
+            say(2, "merge       skipped")
+            say(3, "resolve     skipped")
+        else:
+            from .portfolio import parse_portfolio, resolve_sources
+            from .output.inventory import (build_unified_inventory,
+                                           merge_inventories, save_inventory)
+            from .cli_semex import _run_parser
+
+            paths, notes = resolve_sources(args.input, args.type,
+                                           recurse=not args.no_recurse,
+                                           max_files=args.max_files)
+            if not paths:
+                _emit({"status": "error", "command": "migrate",
+                       "error": f"no {args.type} sources found at {args.input}",
+                       "notes": notes})
+                return
+            say(1, f"crawl       {len(paths)} source(s)")
+            for n in notes:
+                print(f"        note: {n}", file=sys.stderr)
+
+            sf_target = {}
+            if args.database:
+                sf_target["database"] = args.database
+            if args.schema:
+                sf_target["schema"] = args.schema
+
+            run = parse_portfolio(
+                paths, args.type,
+                parse_one=_run_parser,
+                build_inventory=build_unified_inventory,
+                sf_target=sf_target or None,
+                inventory_dir=str(out / "sources"),
+                state_path=str(out / "parse_state.json"),
+                resume=not args.force,
+            )
+            if not run["inventories"]:
+                _emit({"status": "error", "command": "migrate",
+                       "error": f"all {len(paths)} source(s) failed to parse",
+                       "sources": run["sources"]})
+                return
+            say(2, f"parse       {run['ok_count']} ok, {run['failed_count']} failed")
+            for f in run["failed"]:
+                print(f"        failed: {_Path(f['path']).name}: {f['error'][:90]}",
+                      file=sys.stderr)
+
+            inventory = merge_inventories(run["inventories"])
+            if sf_target:
+                inventory["snowflake_target"] = {
+                    **inventory.get("snowflake_target", {}), **sf_target}
+            save_inventory(inventory, str(inv_path))
+            say(3, f"merge       {len(inventory.get('tables', []))} tables, "
+                   f"{len(inventory.get('dimensions', []))} dims, "
+                   f"{len(inventory.get('facts', []))} facts, "
+                   f"{len(inventory.get('metrics', []))} metrics")
+            record("parse", sources=len(paths), ok=run["ok_count"],
+                   failed=run["failed_count"], artifact=str(inv_path))
+            record("merge", artifact=str(inv_path))
+
+        # ── 4. enrich with chart types ─────────────────────────────────────
+        if done("enrich", enr_path):
+            say(4, f"enrich      skipped, {enr_path.name} exists")
+        else:
+            from .chart_extractor import enrich
+            src_files = state.get("source_paths") or []
+            if not src_files:
+                from .portfolio import resolve_sources
+                src_files, _ = resolve_sources(args.input, args.type,
+                                               recurse=not args.no_recurse,
+                                               max_files=args.max_files)
+                state["source_paths"] = src_files
+            res = enrich(inventory_path=str(inv_path), source_files=src_files,
+                         output_path=str(enr_path))
+            cov = res.get("chart_type_coverage", {}) or {}
+            # Report the explicit/heuristic split, not just a count. 100%
+            # heuristic means every chart type was inferred rather than read from
+            # the workbook, which is exactly the sort of thing a reviewer needs to
+            # know before trusting the generated app's chart choices.
+            say(4, f"enrich      {cov.get('total', res.get('worksheet_count', 0))} "
+                   f"worksheet(s): {cov.get('explicit', 0)} explicit mark(s), "
+                   f"{cov.get('heuristic', 0)} inferred")
+            if cov.get("total") and not cov.get("explicit"):
+                print("        note: no explicit mark types found; every chart "
+                      "type is a heuristic guess. Verify chart choices.",
+                      file=sys.stderr)
+            record("enrich", artifact=str(enr_path), coverage=cov)
+
+        # ── 5. visual metadata ─────────────────────────────────────────────
+        if done("visuals", vis_dir):
+            say(5, "visuals     skipped")
+        else:
+            from .visual_extractor import extract
+            vis_dir.mkdir(parents=True, exist_ok=True)
+            src_files = state.get("source_paths") or []
+            if not src_files:
+                from .portfolio import resolve_sources
+                src_files, _ = resolve_sources(args.input, args.type,
+                                               recurse=not args.no_recurse,
+                                               max_files=args.max_files)
+            written, failed_vis = [], 0
+            for src in src_files:
+                stem = "".join(c if (c.isalnum() or c in "-_") else "_"
+                               for c in _Path(src).stem)
+                try:
+                    extract(source_path=src, output_path=str(vis_dir / f"{stem}.json"))
+                    written.append(stem)
+                except Exception as exc:
+                    # Visual metadata is a nice-to-have; losing it for one
+                    # workbook must not end the migration.
+                    failed_vis += 1
+                    logger.warning("visual extraction failed for %s: %s", src, exc)
+            # Deliberately NOT merged into one file: palettes and background
+            # colours are per-workbook, and averaging two themes produces a
+            # theme neither workbook had.
+            say(5, f"visuals     {len(written)} extracted"
+                   + (f", {failed_vis} failed" if failed_vis else ""))
+            record("visuals", extracted=len(written), failed=failed_vis,
+                   artifact=str(vis_dir))
+
+        # ── 6. propose views + generate YAML ───────────────────────────────
+        if done("views", yaml_dir):
+            say(6, "views       skipped")
+            proposal = _json.loads(views_path.read_text()) if views_path.is_file() else {}
+        else:
+            from .views import format_proposal, propose
+            from .output.yaml_generator import generate_all_yamls
+
+            proposal = propose(inventory, strategy=args.strategy)
+            views_path.write_text(_json.dumps(proposal, indent=2, default=str))
+            paths_written = generate_all_yamls(
+                inventory, str(yaml_dir), groups=proposal["views"])
+            say(6, f"views       {proposal['view_count']} proposed, "
+                   f"{len(paths_written)} YAML written")
+            print("\n" + format_proposal(proposal), file=sys.stderr)
+            record("views", count=proposal["view_count"],
+                   yaml=len(paths_written), artifact=str(yaml_dir))
+    except Exception as exc:
+        logger.exception("migrate failed")
+        _emit({"status": "error", "command": "migrate", "error": str(exc),
+               "output_dir": str(out), "completed_steps": sorted(steps),
+               "resume_hint": "re-run the same command; completed steps are skipped"})
+        return
+
+    _emit({
+        "status": "ok",
+        "command": "migrate",
+        "output_dir": str(out),
+        "inventory": str(inv_path),
+        "enriched": str(enr_path),
+        "visuals_dir": str(vis_dir),
+        "views": str(views_path),
+        "semantic_views_dir": str(yaml_dir),
+        "state": str(state_path),
+        "steps": step_log,
+        "view_count": (proposal or {}).get("view_count", 0),
+        "notes": (proposal or {}).get("notes", []),
+        "next": "Review the proposal, then choose what to build "
+                "(semantic views, agent, Streamlit app, React app).",
+        "elapsed_seconds": round(time.perf_counter() - t0, 2),
+    })
+
+
 def cmd_restore_react(args: argparse.Namespace) -> None:
     from .preview import restore_react_production
     try:
@@ -447,6 +672,26 @@ def _build_parser() -> argparse.ArgumentParser:
     # Extraction commands, defined in cli_semex so the argparse definitions are
     # not duplicated between the two entry points.
     cli_semex.register_subparsers(sub)
+
+    # ── migrate ────────────────────────────────────────────────────────────
+    p_mg = sub.add_parser("migrate",
+                          help="Run the whole chain: crawl, parse, merge, enrich, "
+                               "visuals, propose-views, generate-yaml.")
+    p_mg.add_argument("input", help="BI source file, directory, or glob.")
+    p_mg.add_argument("--type", required=True,
+                      choices=["tableau", "powerbi", "looker", "denodo", "businessobjects"])
+    p_mg.add_argument("-o", "--output", help="Output directory (default: ~/Downloads/bim_migrate_<ts>).")
+    p_mg.add_argument("--database", help="Target Snowflake database.")
+    p_mg.add_argument("--schema", help="Target Snowflake schema.")
+    p_mg.add_argument("--strategy", default="auto",
+                      choices=["auto", "co-usage", "one-per-table"],
+                      help="Semantic view grouping strategy (default: auto).")
+    p_mg.add_argument("--max-files", type=int, default=500,
+                      help="Cap on sources parsed (default: 500).")
+    p_mg.add_argument("--no-recurse", action="store_true",
+                      help="Do not descend into subdirectories.")
+    p_mg.add_argument("--force", action="store_true",
+                      help="Re-run every step, ignoring completed artifacts.")
 
     # ── enrich-charts ──────────────────────────────────────────────────────
     p_ec = sub.add_parser("enrich-charts",
@@ -530,6 +775,7 @@ def main() -> None:
     args = parser.parse_args()
 
     dispatch = {
+        "migrate":            cmd_migrate,
         "enrich-charts":      cmd_enrich_charts,
         "extract-visuals":    cmd_extract_visuals,
         "generate-streamlit": cmd_generate_streamlit,

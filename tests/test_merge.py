@@ -152,6 +152,20 @@ check("warnings name their workbook",
 check("per-workbook styles kept separately (they cannot be merged)",
       len(insp.get("by_source", {})) == 2, str(list(insp.get("by_source", {}))))
 
+print("\n=== source_type is preserved, not flattened to 'merged' ===")
+# chart_extractor routes on source_type, so hard-coding "merged" made a merged
+# Tableau portfolio skip the Tableau mark-type path entirely: all 364 chart types
+# were inferred and 119 explicit marks the workbooks declared were discarded.
+check("a single-type merge keeps its type",
+      merge_inventories([A, B])["source_type"] == "tableau",
+      merge_inventories([A, B])["source_type"])
+mixed = merge_inventories([A, {**B, "source_type": "looker"}])
+check("a genuinely mixed merge reports 'merged'", mixed["source_type"] == "merged",
+      mixed["source_type"])
+nested = merge_inventories([A, {**B, "source_type": "merged"}])
+check("an already-merged input does not poison the type",
+      nested["source_type"] == "tableau", nested["source_type"])
+
 print("\n=== degenerate inputs ===")
 check("a single inventory merges to itself",
       len(merge_inventories([A])["dimensions"]) == 2)

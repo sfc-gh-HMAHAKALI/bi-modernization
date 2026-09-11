@@ -137,8 +137,17 @@ def merge_inventories(inventories: list[dict]) -> dict:
     """
     log.info("Merging %d inventories.", len(inventories))
 
+    # Keep the source type when every input agrees. Hard-coding "merged" loses
+    # the information downstream dispatch depends on: chart_extractor routes on
+    # source_type, so a merged Tableau portfolio silently skipped the Tableau
+    # mark-type path and inferred all 364 chart types heuristically, discarding
+    # 119 explicit marks the workbooks actually declared.
+    types = {i.get("source_type") for i in inventories if i.get("source_type")}
+    types.discard("merged")
+    resolved_type = types.pop() if len(types) == 1 else "merged"
+
     merged: dict[str, Any] = {
-        "source_type": "merged",
+        "source_type": resolved_type,
         "snowflake_target": inventories[0].get("snowflake_target", {}) if inventories else {},
         "tables": [],
         "relationships": [],
