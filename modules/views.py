@@ -158,6 +158,9 @@ def propose(inventory: dict, *, strategy: str = "auto") -> dict[str, Any]:
             "tables": group,
             "evidence": {
                 # Why these tables are together, in the terms the decision was made in.
+                # Counts are by *column contribution*: a workbook or dashboard that
+                # references a table without using any of its columns adds nothing
+                # to the view, so counting it would overstate the evidence.
                 "dashboards": dashboards,
                 "dashboard_count": len(dashboards),
                 "workbooks": sources,
@@ -232,7 +235,12 @@ def format_proposal(proposal: dict) -> str:
         else:
             lines.append("    used by   no dashboard")
         if e["workbook_count"] > 1:
-            lines.append(f"    spans     {e['workbook_count']} workbooks")
+            # Say what is being counted. A workbook can reference a table as a
+            # relation while contributing no columns to it, so "spans N
+            # workbooks" alone invites a reviewer to count differently and
+            # conclude the number is wrong.
+            lines.append(f"    spans     {e['workbook_count']} workbooks "
+                         f"(contributing columns)")
         if e["tables_with_no_dashboard"]:
             lines.append(f"    unused    {', '.join(e['tables_with_no_dashboard'])}")
         lines.append("")
